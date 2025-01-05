@@ -383,24 +383,80 @@ class Robot:
         return self.get_observation(), reward, done
 
     def calculate_fast_reward(self, old_op_map, new_op_map, move_vector):
-        """計算獎勵"""
-        # 探索獎勵
-        explored_diff = float(
-            np.sum(new_op_map == 255) - np.sum(old_op_map == 255)
-        ) / 14000 * REWARD_CONFIG['exploration_weight']
+        """計算改進的獎勵函數
         
-        # 移動懲罰
-        movement_cost = REWARD_CONFIG['movement_penalty'] * np.linalg.norm(move_vector)
+        Args:
+            old_op_map: 更新前的地圖
+            new_op_map: 更新後的地圖
+            move_vector: 移動向量
+            
+        Returns:
+            float: 計算得到的獎勵值
+        """
+        # 1. 探索獎勵（基於新探索的面積）
+        new_explored = np.sum(new_op_map == 255) - np.sum(old_op_map == 255)
+        exploration_reward = new_explored / 14000.0 * REWARD_CONFIG['exploration_weight']
         
-        # 離目標點越近獎勵越高（之後可能會拿掉）
-        if self.current_target_frontier is not None:
-            distance_to_target = np.linalg.norm(
-                self.current_target_frontier - self.robot_position)
-            progress_reward = -0.0001 * distance_to_target
+        # 2. 移動效率獎勵
+        movement_length = np.linalg.norm(move_vector)
+        if new_explored > 0:
+            # 如果有新探索區域，獎勵更短的移動距離
+            efficiency_reward = new_explored / (movement_length + 1.0) * 0.1
         else:
-            progress_reward = 0
+            # 如果沒有新探索區域，懲罰移動
+            efficiency_reward = REWARD_CONFIG['movement_penalty'] * movement_length
         
-        total_reward = explored_diff + movement_cost + progress_reward
+        # 3. 協同探索獎勵
+        if self.other_robot_position is not None:
+            distance_to_other = np.linalg.norm(self.robot_position - self.other_robot_position)
+            # 鼓勵保持適當距離（既不要太近也不要太遠）
+            optimal_distance = self.sensor_range * 2
+            distance_reward = -0.1 * abs(distance_to_other - optimal_distance) / optimal_distance
+        else:
+            distance_reward = 0
+        
+        # # 4. 目標導向獎勵
+        # target_reward = 0
+        # if self.current_target_frontier is not None:
+        #     # 計算到目標的距離變化
+        #     old_distance = np.linalg.norm(
+        #         self.robot_position - move_vector - self.current_target_frontier)
+        #     new_distance = np.linalg.norm(
+        #         self.robot_position - self.current_target_frontier)
+            
+        #     # 如果距離減少，給予獎勵
+        #     if new_distance < old_distance:
+        #         target_reward = 0.1 * (old_distance - new_distance) / old_distance
+            
+        #     # 如果到達目標附近
+        #     if new_distance < ROBOT_CONFIG['target_reach_threshold']:
+        #         target_reward += 0.5
+        
+        # 5. 重複探索懲罰
+        overlap_penalty = 0
+        if self.other_robot_position is not None:
+            # 計算與其他機器人探索範圍的重疊
+            other_range = ROBOT_CONFIG['sensor_range']
+            overlap_dist = np.linalg.norm(self.robot_position - self.other_robot_position)
+            if overlap_dist < other_range:
+                overlap_penalty = -0.2 * (1 - overlap_dist/other_range)
+        
+        # 6. 探索完成獎勵
+        completion_reward = 0
+        exploration_progress = np.sum(new_op_map == 255) / np.sum(self.global_map == 255)
+        if exploration_progress > self.finish_percent:
+            completion_reward = 2.0
+        
+        # 組合所有獎勵
+        total_reward = (
+            exploration_reward +
+            efficiency_reward +
+            distance_reward +
+            # target_reward +
+            overlap_penalty +
+            completion_reward
+        )
+        
         return np.clip(total_reward, -1, 1)
 
     def map_setup(self, location):
