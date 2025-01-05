@@ -401,7 +401,8 @@ class Robot:
         movement_length = np.linalg.norm(move_vector)
         if new_explored > 0:
             # 如果有新探索區域，獎勵更短的移動距離
-            efficiency_reward = new_explored / (movement_length + 1.0) * 0.1
+            # efficiency_reward = new_explored / (movement_length + 1.0) * 0.1
+            efficiency_reward = 0
         else:
             # 如果沒有新探索區域，懲罰移動
             efficiency_reward = REWARD_CONFIG['movement_penalty'] * movement_length
