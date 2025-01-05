@@ -411,7 +411,7 @@ class Robot:
             distance_to_other = np.linalg.norm(self.robot_position - self.other_robot_position)
             # 鼓勵保持適當距離（既不要太近也不要太遠）
             optimal_distance = self.sensor_range * 2
-            distance_reward = -0.1 * abs(distance_to_other - optimal_distance) / optimal_distance
+            distance_reward = -0.5 * abs(distance_to_other - optimal_distance) / optimal_distance
         else:
             distance_reward = 0
         
@@ -441,11 +441,11 @@ class Robot:
             if overlap_dist < other_range:
                 overlap_penalty = -0.2 * (1 - overlap_dist/other_range)
         
-        # 6. 探索完成獎勵
-        completion_reward = 0
-        exploration_progress = np.sum(new_op_map == 255) / np.sum(self.global_map == 255)
-        if exploration_progress > self.finish_percent:
-            completion_reward = 2.0
+        # # 6. 探索完成獎勵
+        # completion_reward = 0
+        # exploration_progress = np.sum(new_op_map == 255) / np.sum(self.global_map == 255)
+        # if exploration_progress > self.finish_percent:
+        #     completion_reward = 2.0
         
         # 組合所有獎勵
         total_reward = (
@@ -453,8 +453,8 @@ class Robot:
             efficiency_reward +
             distance_reward +
             # target_reward +
-            overlap_penalty +
-            completion_reward
+            overlap_penalty 
+            # completion_reward
         )
         
         return np.clip(total_reward, -1, 1)
