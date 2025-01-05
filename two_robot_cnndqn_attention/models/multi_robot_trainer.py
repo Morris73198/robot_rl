@@ -9,16 +9,6 @@ from two_robot_cnndqn_attention.config import MODEL_DIR, ROBOT_CONFIG
 
 class MultiRobotTrainer:
     def __init__(self, model, robot1, robot2, memory_size=10000, batch_size=16, gamma=0.99):
-        """初始化多機器人訓練器
-
-        Args:
-            model: MultiRobotNetworkModel實例
-            robot1: 第一個Robot實例
-            robot2: 第二個Robot實例
-            memory_size: 經驗回放緩衝區大小
-            batch_size: 訓練批次大小
-            gamma: 獎勵折扣因子
-        """
         self.model = model
         self.robot1 = robot1
         self.robot2 = robot2
@@ -26,59 +16,40 @@ class MultiRobotTrainer:
         self.batch_size = batch_size
         self.gamma = gamma
         
-        self.map_size = self.robot1.map_size  # 假設兩個機器人使用相同地圖
+        self.map_size = self.robot1.map_size
         
         # 訓練參數
-        self.epsilon = 1.0  # 探索率
-        self.epsilon_min = 0.1  # 最小探索率
-        self.epsilon_decay = 0.995  # 探索率衰減
+        self.epsilon = 1.0
+        self.epsilon_min = 0.1
+        self.epsilon_decay = 0.995
         
         # 訓練歷史記錄
         self.training_history = {
-            'episode_rewards': [],  # 每一輪的總獎勵
-            'episode_lengths': [],  # 每一輪的步數
-            'exploration_rates': [],  # 探索率變化
-            'losses': [],  # 損失值
-            'robot1_rewards': [],  # Robot1的獎勵
-            'robot2_rewards': [],  # Robot2的獎勵
-            'exploration_progress': []  # 探索進度
+            'episode_rewards': [],
+            'episode_lengths': [],
+            'exploration_rates': [],
+            'losses': [],
+            'robot1_rewards': [],
+            'robot2_rewards': [],
+            'exploration_progress': []
         }
     
     def remember(self, state, frontiers, robot1_pos, robot2_pos, 
+                robot1_target, robot2_target,
                 robot1_action, robot2_action, robot1_reward, robot2_reward,
-                next_state, next_frontiers, next_robot1_pos, next_robot2_pos, done):
-        """存儲經驗到回放緩衝區
-        
-        Args:
-            state: 當前狀態
-            frontiers: 當前可用的frontier點
-            robot1_pos: Robot1的位置
-            robot2_pos: Robot2的位置
-            robot1_action: Robot1選擇的動作
-            robot2_action: Robot2選擇的動作
-            robot1_reward: Robot1獲得的獎勵
-            robot2_reward: Robot2獲得的獎勵
-            next_state: 下一個狀態
-            next_frontiers: 下一個狀態的frontier點
-            next_robot1_pos: 下一個狀態Robot1的位置
-            next_robot2_pos: 下一個狀態Robot2的位置
-            done: 是否結束
-        """
+                next_state, next_frontiers, next_robot1_pos, next_robot2_pos, 
+                next_robot1_target, next_robot2_target, done):
+        """存儲經驗到回放緩衝區"""
         self.memory.append((
-            state, frontiers, robot1_pos, robot2_pos,
+            state, frontiers, robot1_pos, robot2_pos, 
+            robot1_target, robot2_target,
             robot1_action, robot2_action, robot1_reward, robot2_reward,
-            next_state, next_frontiers, next_robot1_pos, next_robot2_pos, done
+            next_state, next_frontiers, next_robot1_pos, next_robot2_pos,
+            next_robot1_target, next_robot2_target, done
         ))
     
     def pad_frontiers(self, frontiers):
-        """填充frontier點到固定長度並進行標準化
-        
-        Args:
-            frontiers: 原始frontier點列表
-            
-        Returns:
-            標準化且填充後的frontier數組
-        """
+        """填充frontier點到固定長度並進行標準化"""
         padded = np.zeros((self.model.max_frontiers, 2))
         
         if len(frontiers) > 0:
@@ -86,45 +57,42 @@ class MultiRobotTrainer:
             
             # 標準化座標
             normalized_frontiers = frontiers.copy()
-            normalized_frontiers[:, 0] = frontiers[:, 0] / float(self.map_size[1])  # x座標
-            normalized_frontiers[:, 1] = frontiers[:, 1] / float(self.map_size[0])  # y座標
+            normalized_frontiers[:, 0] = frontiers[:, 0] / float(self.map_size[1])
+            normalized_frontiers[:, 1] = frontiers[:, 1] / float(self.map_size[0])
             
-            # 填充
             n_frontiers = min(len(frontiers), self.model.max_frontiers)
             padded[:n_frontiers] = normalized_frontiers[:n_frontiers]
         
         return padded
     
+    def get_normalized_target(self, target):
+        """標準化目標位置"""
+        if target is None:
+            return np.array([0.0, 0.0])  # 如果沒有目標，返回原點
+        normalized = np.array([
+            target[0] / float(self.map_size[1]),
+            target[1] / float(self.map_size[0])
+        ])
+        return normalized
+    
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos):
-        """為兩個機器人選擇動作
-        
-        Args:
-            state: 當前狀態
-            frontiers: 可用的frontier點
-            robot1_pos: Robot1的位置
-            robot2_pos: Robot2的位置
-            
-        Returns:
-            tuple(int, int): (Robot1的動作, Robot2的動作)
-        """
+        """為兩個機器人選擇動作"""
         if len(frontiers) == 0:
             return 0, 0
             
-        MIN_TARGET_DISTANCE = 50  # 最小目標距離閾值
+        MIN_TARGET_DISTANCE = 50
         
         # epsilon-greedy策略
         if np.random.random() < self.epsilon:
             valid_frontiers1 = list(range(min(self.model.max_frontiers, len(frontiers))))
             valid_frontiers2 = valid_frontiers1.copy()
             
-            # 檢查Robot2的當前目標
             if self.robot2.current_target_frontier is not None:
                 valid_frontiers1 = [
                     i for i in valid_frontiers1 
                     if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) >= MIN_TARGET_DISTANCE
                 ]
                 
-            # 檢查Robot1的當前目標
             if self.robot1.current_target_frontier is not None:
                 valid_frontiers2 = [
                     i for i in valid_frontiers2 
@@ -146,8 +114,16 @@ class MultiRobotTrainer:
         robot1_pos_batch = np.expand_dims(robot1_pos, 0)
         robot2_pos_batch = np.expand_dims(robot2_pos, 0)
         
+        # 獲取當前目標位置
+        robot1_target = self.get_normalized_target(self.robot1.current_target_frontier)
+        robot2_target = self.get_normalized_target(self.robot2.current_target_frontier)
+        robot1_target_batch = np.expand_dims(robot1_target, 0)
+        robot2_target_batch = np.expand_dims(robot2_target, 0)
+        
         predictions = self.model.predict(
-            state_batch, frontiers_batch, robot1_pos_batch, robot2_pos_batch
+            state_batch, frontiers_batch, 
+            robot1_pos_batch, robot2_pos_batch,
+            robot1_target_batch, robot2_target_batch
         )
         
         valid_frontiers = min(self.model.max_frontiers, len(frontiers))
@@ -158,12 +134,12 @@ class MultiRobotTrainer:
         if self.robot2.current_target_frontier is not None:
             for i in range(valid_frontiers):
                 if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) < MIN_TARGET_DISTANCE:
-                    robot1_q[i] *= 0.0001  # 大幅降低太近的目標的Q值
+                    robot1_q[i] *= 0.0001
                     
         if self.robot1.current_target_frontier is not None:
             for i in range(valid_frontiers):
                 if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) < MIN_TARGET_DISTANCE:
-                    robot2_q[i] *= 0.0001  # 大幅降低太近的目標的Q值
+                    robot2_q[i] *= 0.0001
         
         robot1_action = np.argmax(robot1_q)
         robot2_action = np.argmax(robot2_q)
@@ -171,28 +147,29 @@ class MultiRobotTrainer:
         return robot1_action, robot2_action
 
     def train_step(self):
-        """執行一步訓練
-        
-        Returns:
-            float: 訓練損失值
-        """
+        """執行一步訓練"""
         if len(self.memory) < self.batch_size:
             return 0
         
         batch = random.sample(self.memory, self.batch_size)
         
-        # 準備批次數據
         states = []
         frontiers_batch = []
         robot1_pos_batch = []
         robot2_pos_batch = []
+        robot1_target_batch = []
+        robot2_target_batch = []
         next_states = []
         next_frontiers_batch = []
         next_robot1_pos_batch = []
         next_robot2_pos_batch = []
+        next_robot1_target_batch = []
+        next_robot2_target_batch = []
         
-        for state, frontiers, robot1_pos, robot2_pos, _, _, _, _, \
-            next_state, next_frontiers, next_robot1_pos, next_robot2_pos, _ in batch:
+        for (state, frontiers, robot1_pos, robot2_pos, 
+             robot1_target, robot2_target, _, _, _, _,
+             next_state, next_frontiers, next_robot1_pos, next_robot2_pos,
+             next_robot1_target, next_robot2_target, _) in batch:
             
             if len(state.shape) == 2:
                 state = np.expand_dims(state, axis=-1)
@@ -203,27 +180,37 @@ class MultiRobotTrainer:
             frontiers_batch.append(self.pad_frontiers(frontiers))
             robot1_pos_batch.append(robot1_pos)
             robot2_pos_batch.append(robot2_pos)
+            robot1_target_batch.append(self.get_normalized_target(robot1_target))
+            robot2_target_batch.append(self.get_normalized_target(robot2_target))
             
             next_states.append(next_state)
             next_frontiers_batch.append(self.pad_frontiers(next_frontiers))
             next_robot1_pos_batch.append(next_robot1_pos)
             next_robot2_pos_batch.append(next_robot2_pos)
+            next_robot1_target_batch.append(self.get_normalized_target(next_robot1_target))
+            next_robot2_target_batch.append(self.get_normalized_target(next_robot2_target))
         
         states = np.array(states)
         frontiers_batch = np.array(frontiers_batch)
         robot1_pos_batch = np.array(robot1_pos_batch)
         robot2_pos_batch = np.array(robot2_pos_batch)
+        robot1_target_batch = np.array(robot1_target_batch)
+        robot2_target_batch = np.array(robot2_target_batch)
         next_states = np.array(next_states)
         next_frontiers_batch = np.array(next_frontiers_batch)
         next_robot1_pos_batch = np.array(next_robot1_pos_batch)
         next_robot2_pos_batch = np.array(next_robot2_pos_batch)
+        next_robot1_target_batch = np.array(next_robot1_target_batch)
+        next_robot2_target_batch = np.array(next_robot2_target_batch)
         
         # 使用目標網絡計算下一個狀態的Q值
         target_predictions = self.model.target_model.predict({
             'map_input': next_states,
             'frontier_input': next_frontiers_batch,
             'robot1_pos_input': next_robot1_pos_batch,
-            'robot2_pos_input': next_robot2_pos_batch
+            'robot2_pos_input': next_robot2_pos_batch,
+            'robot1_target_input': next_robot1_target_batch,
+            'robot2_target_input': next_robot2_target_batch
         })
         
         # 使用當前網絡計算當前Q值
@@ -231,7 +218,9 @@ class MultiRobotTrainer:
             'map_input': states,
             'frontier_input': frontiers_batch,
             'robot1_pos_input': robot1_pos_batch,
-            'robot2_pos_input': robot2_pos_batch
+            'robot2_pos_input': robot2_pos_batch,
+            'robot1_target_input': robot1_target_batch,
+            'robot2_target_input': robot2_target_batch
         })
         
         # 準備訓練目標
@@ -239,8 +228,9 @@ class MultiRobotTrainer:
         robot2_targets = current_predictions['robot2'].copy()
         
         # 更新Q值
-        for i, (_, _, _, _, robot1_action, robot2_action, robot1_reward, robot2_reward, 
-               _, _, _, _, done) in enumerate(batch):
+        for i, (_, _, _, _, _, _, robot1_action, robot2_action, 
+               robot1_reward, robot2_reward, _, _, _, _, _, _, done) in enumerate(batch):
+            
             robot1_action = min(robot1_action, self.model.max_frontiers - 1)
             robot2_action = min(robot2_action, self.model.max_frontiers - 1)
             
@@ -252,30 +242,14 @@ class MultiRobotTrainer:
                     self.gamma * np.max(target_predictions['robot1'][i])
                 robot2_targets[i][robot2_action] = robot2_reward + \
                     self.gamma * np.max(target_predictions['robot2'][i])
-                    
-                    
-        # print("Robot1 target values:", robot1_targets[0])
-        # print("Robot2 target values:", robot2_targets[0])
         
         # 訓練模型
-        loss = self.model.model.train_on_batch(
-            {
-                'map_input': states,
-                'frontier_input': frontiers_batch,
-                'robot1_pos_input': robot1_pos_batch,
-                'robot2_pos_input': robot2_pos_batch
-            },
-            {
-                'robot1': robot1_targets,
-                'robot2': robot2_targets
-            }
+        loss = self.model.train_on_batch(
+            states, frontiers_batch, 
+            robot1_pos_batch, robot2_pos_batch,
+            robot1_target_batch, robot2_target_batch,
+            robot1_targets, robot2_targets
         )
-        # print("Training loss details:", loss)
-        
-        
-        # 更新探索率
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
         
         return loss
     
@@ -301,21 +275,24 @@ class MultiRobotTrainer:
                 robot2_target = None
                 robot1_action = None
                 robot2_action = None
-                robot1_in_progress = False  # 表示是否正在執行任務
+                robot1_in_progress = False
                 robot2_in_progress = False
                 
                 while not (self.robot1.check_done() or self.robot2.check_done()):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
-
+                        
                     # 獲取當前狀態
                     robot1_pos = self.robot1.get_normalized_position()
                     robot2_pos = self.robot2.get_normalized_position()
                     
+                    # 保存當前目標位置用於經驗回放
+                    old_robot1_target = self.robot1.current_target_frontier
+                    old_robot2_target = self.robot2.current_target_frontier
+                    
                     # Robot 1 目標選擇和移動
                     if not robot1_in_progress:
-                        # 只有在沒有進行中的任務時才選擇新目標
                         robot1_action, _ = self.choose_actions(
                             state, frontiers, robot1_pos, robot2_pos
                         )
@@ -324,7 +301,6 @@ class MultiRobotTrainer:
                     
                     # Robot 2 目標選擇和移動
                     if not robot2_in_progress:
-                        # 只有在沒有進行中的任務時才選擇新目標
                         _, robot2_action = self.choose_actions(
                             state, frontiers, robot1_pos, robot2_pos
                         )
@@ -339,7 +315,7 @@ class MultiRobotTrainer:
                     if robot1_in_progress and robot1_target is not None:
                         next_state1, r1, d1 = self.robot1.move_to_frontier(robot1_target)
                         robot1_reward = r1
-                        if d1:  # 只有在完成目標時才重置狀態
+                        if d1:
                             robot1_in_progress = False
                             robot1_target = None
                     else:
@@ -352,7 +328,7 @@ class MultiRobotTrainer:
                     if robot2_in_progress and robot2_target is not None:
                         next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target)
                         robot2_reward = r2
-                        if d2:  # 只有在完成目標時才重置狀態
+                        if d2:
                             robot2_in_progress = False
                             robot2_target = None
                     else:
@@ -365,35 +341,37 @@ class MultiRobotTrainer:
                     self.robot1.other_robot_position = self.robot2.robot_position.copy()
                     self.robot2.other_robot_position = self.robot1.robot_position.copy()
                     
-                    # 更新狀態
-                    robot1_state = next_state1
-                    robot2_state = next_state2
-                    state = next_state1  # 使用共享地圖狀態
+                    # 獲取下一個狀態的位置和目標信息
+                    next_frontiers = self.robot1.get_frontiers()
+                    next_robot1_pos = self.robot1.get_normalized_position()
+                    next_robot2_pos = self.robot2.get_normalized_position()
+                    next_robot1_target = self.robot1.current_target_frontier
+                    next_robot2_target = self.robot2.current_target_frontier
                     
                     # 只有在任務完成時才進行經驗存儲和訓練
                     if not robot1_in_progress or not robot2_in_progress:
-                        next_frontiers = self.robot1.get_frontiers()
-                        next_robot1_pos = self.robot1.get_normalized_position()
-                        next_robot2_pos = self.robot2.get_normalized_position()
-                        
                         self.remember(
                             state, frontiers, robot1_pos, robot2_pos,
+                            old_robot1_target, old_robot2_target,
                             robot1_action if not robot1_in_progress else 0,
                             robot2_action if not robot2_in_progress else 0,
                             robot1_reward, robot2_reward,
-                            state, next_frontiers, next_robot1_pos, next_robot2_pos,
+                            next_state1, next_frontiers, next_robot1_pos, next_robot2_pos,
+                            next_robot1_target, next_robot2_target,
                             not robot1_in_progress or not robot2_in_progress
                         )
                         
                         loss = self.train_step()
-                        # if loss is not None and isinstance(loss, (int, float)):
-                        #     episode_losses.append(loss)
                         if loss is not None:
-                            # 如果是列表，取平均值
                             if isinstance(loss, list):
                                 episode_losses.append(np.mean(loss))
                             elif isinstance(loss, (int, float)):
                                 episode_losses.append(loss)
+                    
+                    # 更新狀態
+                    robot1_state = next_state1
+                    robot2_state = next_state2
+                    state = next_state1  # 使用共享地圖狀態
                     
                     # 更新獎勵統計
                     total_reward += (robot1_reward + robot2_reward)
@@ -408,7 +386,7 @@ class MultiRobotTrainer:
                         if self.robot2.plot:
                             self.robot2.plot_env()
                 
-                # Episode結束後的處理（代碼保持不變）
+                # Episode結束後的處理
                 exploration_progress = self.robot1.get_exploration_progress()
                 self.training_history['episode_rewards'].append(total_reward)
                 self.training_history['robot1_rewards'].append(robot1_total_reward)
@@ -420,6 +398,7 @@ class MultiRobotTrainer:
                 )
                 self.training_history['exploration_progress'].append(exploration_progress)
                 
+                # 定期更新目標網絡和保存模型
                 if (episode + 1) % target_update_freq == 0:
                     self.model.update_target_model()
                 
@@ -449,7 +428,7 @@ class MultiRobotTrainer:
                 # 準備下一個地圖
                 state = self.robot1.reset()
                 self.robot2.reset()
-                
+            
             # 訓練結束後保存最終模型
             self.save_checkpoint(episodes)
             
