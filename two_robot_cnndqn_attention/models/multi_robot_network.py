@@ -1,154 +1,445 @@
 import tensorflow as tf
 import numpy as np
+from tensorflow.keras import layers, models, regularizers
+
+class LayerNormalization(layers.Layer):
+    """自定義層正規化層"""
+    def __init__(self, epsilon=1e-6, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+
+    def build(self, input_shape):
+        self.gamma = self.add_weight(
+            name='gamma',
+            shape=input_shape[-1:],
+            initializer='ones',
+            trainable=True)
+        self.beta = self.add_weight(
+            name='beta',
+            shape=input_shape[-1:],
+            initializer='zeros',
+            trainable=True)
+        super().build(input_shape)
+
+    def call(self, x):
+        mean = tf.reduce_mean(x, axis=-1, keepdims=True)
+        variance = tf.reduce_mean(tf.square(x - mean), axis=-1, keepdims=True)
+        return self.gamma * (x - mean) / tf.sqrt(variance + self.epsilon) + self.beta
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'epsilon': self.epsilon})
+        return config
+
+class MultiHeadAttention(layers.Layer):
+    """多頭注意力層"""
+    def __init__(self, d_model, num_heads, dropout_rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        
+        assert d_model % num_heads == 0
+        self.depth = d_model // num_heads
+        
+        self.wq = layers.Dense(d_model)
+        self.wk = layers.Dense(d_model)
+        self.wv = layers.Dense(d_model)
+        self.dense = layers.Dense(d_model)
+        self.dropout = layers.Dropout(dropout_rate)
+        self.layer_norm = LayerNormalization()
+        
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'dropout_rate': self.dropout_rate
+        })
+        return config
+        
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+        
+    def scaled_dot_product_attention(self, q, k, v, mask=None):
+        """計算注意力權重"""
+        matmul_qk = tf.matmul(q, k, transpose_b=True)
+        
+        # 縮放 matmul_qk
+        dk = tf.cast(tf.shape(k)[-1], tf.float32)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+        
+        # 添加 mask (如果有的話)
+        if mask is not None:
+            scaled_attention_logits += (mask * -1e9)
+        
+        # softmax 後得到注意力權重
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        output = tf.matmul(attention_weights, v)
+        return output
+        
+    def call(self, inputs, mask=None, training=None):
+        q, k, v = inputs
+        batch_size = tf.shape(q)[0]
+        
+        # 線性變換
+        q = self.wq(q)
+        k = self.wk(k)
+        v = self.wv(v)
+        
+        # 分割頭
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        
+        # 計算注意力
+        scaled_attention = self.scaled_dot_product_attention(q, k, v, mask)
+        
+        # 重組多頭輸出
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+        concat_attention = tf.reshape(scaled_attention, 
+                                    (batch_size, -1, self.d_model))
+        
+        # 最後的線性層和層正規化
+        output = self.dense(concat_attention)
+        output = self.dropout(output, training=training)
+        output = self.layer_norm(output)
+        
+        return output
+
+class PositionalEncoding(layers.Layer):
+    """位置編碼層"""
+    def __init__(self, max_position, d_model, **kwargs):
+        super().__init__(**kwargs)
+        self.max_position = max_position
+        self.d_model = d_model
+        self.pos_encoding = self.positional_encoding(max_position, d_model)
+        
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'max_position': self.max_position,
+            'd_model': self.d_model
+        })
+        return config
+        
+    def positional_encoding(self, position, d_model):
+        angle_rads = self.get_angles(
+            np.arange(position)[:, np.newaxis],
+            np.arange(d_model)[np.newaxis, :],
+            d_model
+        )
+        
+        # 對偶數位置使用 sin，奇數位置使用 cos
+        angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+        angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+        
+        pos_encoding = angle_rads[np.newaxis, ...]
+        return tf.cast(pos_encoding, dtype=tf.float32)
+        
+    def get_angles(self, pos, i, d_model):
+        angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
+        return pos * angle_rates
+        
+    def call(self, inputs):
+        seq_len = tf.shape(inputs)[1]
+        return inputs + self.pos_encoding[:, :seq_len, :]
+
+class FeedForward(layers.Layer):
+    """前饋神經網路層"""
+    def __init__(self, d_model, dff, dropout_rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.dff = dff
+        self.dropout_rate = dropout_rate
+        
+        self.dense1 = layers.Dense(dff, activation='relu')
+        self.dense2 = layers.Dense(d_model)
+        self.dropout = layers.Dropout(dropout_rate)
+        self.layer_norm = LayerNormalization()
+        
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'dff': self.dff,
+            'dropout_rate': self.dropout_rate
+        })
+        return config
+        
+    def call(self, x, training=None):
+        # 兩層前饋網路
+        ffn_output = self.dense1(x)
+        ffn_output = self.dropout(ffn_output, training=training)
+        ffn_output = self.dense2(ffn_output)
+        ffn_output = self.dropout(ffn_output, training=training)
+        
+        # 殘差連接和層正規化
+        ffn_output = self.layer_norm(x + ffn_output)
+        return ffn_output
+
+class SpatialAttention(layers.Layer):
+    """空間注意力層"""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        
+    def build(self, input_shape):
+        self.conv1 = layers.Conv2D(1, 7, padding='same', use_bias=False)
+        self.norm = LayerNormalization()
+        super().build(input_shape)
+        
+    def call(self, inputs):
+        # 計算空間注意力圖
+        avg_pool = tf.reduce_mean(inputs, axis=-1, keepdims=True)
+        max_pool = tf.reduce_max(inputs, axis=-1, keepdims=True)
+        concat = tf.concat([avg_pool, max_pool], axis=-1)
+        attention_map = self.conv1(concat)
+        attention_map = tf.sigmoid(attention_map)
+        
+        # 應用注意力
+        output = inputs * attention_map
+        output = self.norm(output)
+        return output
 
 class MultiRobotNetworkModel:
     def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
-        """初始化多機器人網路模型，保持原有接口"""
-        self.input_shape = input_shape
-        self.max_frontiers = max_frontiers
-        self.model = self._build_model()
-        self.target_model = self._build_model()
-        
-    def _build_cnn_block(self, inputs, filters, kernel_size):
-        """構建CNN區塊，包含殘差連接"""
-        x = tf.keras.layers.Conv2D(filters, kernel_size, padding='same')(inputs)
-        x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Activation('relu')(x)
-        
-        # 殘差連接
-        if inputs.shape[-1] == filters:
-            x = tf.keras.layers.Add()([inputs, x])
-        return tf.keras.layers.Activation('relu')(x)
-    
-    def _build_frontier_attention(self, frontiers, robot_pos, other_pos, other_target):
-        """改進後的frontier注意力機制
+        """初始化多機器人網路模型
         
         Args:
-            frontiers: (batch, n_frontiers, 2) - frontier點坐標
-            robot_pos: (batch, 2) - 當前機器人位置
-            other_pos: (batch, 2) - 另一個機器人位置
-            other_target: (batch, 2) - 另一個機器人的目標
-        
-        Returns:
-            attention_weights: (batch, n_frontiers, 1) - 注意力權重
+            input_shape: 輸入地圖的形狀，默認(84, 84, 1)
+            max_frontiers: 最大frontier點數量，默認50
         """
-        # 1. 計算與當前機器人的距離特徵
-        rel_to_robot = frontiers - tf.expand_dims(robot_pos, axis=1)
-        dist_to_robot = tf.norm(rel_to_robot, axis=-1, keepdims=True)  # 基礎距離特徵
+        self.input_shape = input_shape
+        self.max_frontiers = max_frontiers
+        self.d_model = 256  # 模型維度
+        self.num_heads = 8  # 注意力頭數
+        self.dff = 512  # 前饋網路維度
+        self.dropout_rate = 0.1
         
-        # 2. 計算與其他機器人相關的特徵
-        rel_to_other = frontiers - tf.expand_dims(other_pos, axis=1)
-        dist_to_other = tf.norm(rel_to_other, axis=-1, keepdims=True)  # 到其他機器人的距離
+        # 構建並編譯模型
+        self.model = self._build_model()
+        self.target_model = self._build_model()
+        self.target_model.set_weights(self.model.get_weights())
         
-        # 3. 計算與其他機器人目標的關係
-        rel_to_other_target = frontiers - tf.expand_dims(other_target, axis=1)
-        dist_to_other_target = tf.norm(rel_to_other_target, axis=-1, keepdims=True)
+    def _build_perception_module(self, inputs):
+        """構建感知模塊"""
+        # 多尺度特徵提取
+        conv_configs = [
+            {'filters': 32, 'kernel_size': 3, 'strides': 1},
+            {'filters': 32, 'kernel_size': 5, 'strides': 1},
+            {'filters': 32, 'kernel_size': 7, 'strides': 1}
+        ]
         
-        # 4. 計算相對方向（用於評估是否在同一區域）
-        robot_to_other = tf.expand_dims(other_pos - robot_pos, axis=1)  # 機器人之間的向量
-        robot_to_frontier = rel_to_robot  # frontier相對於當前機器人的向量
+        features = []
+        for config in conv_configs:
+            x = layers.Conv2D(
+                filters=config['filters'],
+                kernel_size=config['kernel_size'],
+                strides=config['strides'],
+                padding='same',
+                kernel_regularizer=regularizers.l2(0.01)
+            )(inputs)
+            x = layers.BatchNormalization()(x)
+            x = layers.Activation('relu')(x)
+            
+            # 添加空間注意力
+            x = SpatialAttention()(x)
+            
+            x = layers.Conv2D(
+                filters=config['filters'],
+                kernel_size=config['kernel_size'],
+                strides=config['strides'],
+                padding='same',
+                kernel_regularizer=regularizers.l2(0.01)
+            )(x)
+            x = layers.BatchNormalization()(x)
+            x = layers.Activation('relu')(x)
+            features.append(x)
+            
+        # 特徵融合
+        concat_features = layers.Concatenate()(features)
+        x = layers.Conv2D(64, 1)(concat_features)  # 1x1 卷積融合通道
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.MaxPooling2D(pool_size=(2, 2))(x)
         
-        # 標準化向量
-        robot_to_other = tf.math.l2_normalize(robot_to_other, axis=-1)
-        robot_to_frontier = tf.math.l2_normalize(robot_to_frontier, axis=-1)
+        return x
+
+    def _build_coordination_module(self, robot1_state, robot2_state):
+        """構建協調模塊"""
+        # 擴展維度以適應注意力機制
+        robot1_expanded = layers.Lambda(
+            lambda x: tf.expand_dims(x, axis=1)
+        )(robot1_state)
+        robot2_expanded = layers.Lambda(
+            lambda x: tf.expand_dims(x, axis=1)
+        )(robot2_state)
         
-        # 計算夾角餘弦
-        angle_cos = tf.reduce_sum(robot_to_frontier * robot_to_other, axis=-1, keepdims=True)
+        # 合併機器人狀態
+        combined_states = layers.Concatenate(axis=1)([
+            robot1_expanded, robot2_expanded
+        ])
         
-        # 5. 組合特徵
-        attention_features = tf.concat([
-            1.0 / (1.0 + dist_to_robot),      # 距離機器人的近程指標
-            1.0 / (1.0 + dist_to_other),      # 距離其他機器人的近程指標
-            1.0 / (1.0 + dist_to_other_target),# 距離其他目標的近程指標
-            angle_cos,                         # 方向特徵
-        ], axis=-1)
+        # 多頭注意力處理
+        attention = MultiHeadAttention(
+            d_model=self.d_model,
+            num_heads=self.num_heads,
+            dropout_rate=self.dropout_rate
+        )([combined_states, combined_states, combined_states])
         
-        # 6. 注意力網絡
-        attention = tf.keras.layers.Dense(32, activation='relu')(attention_features)
-        attention = tf.keras.layers.Dense(1, activation='sigmoid')(attention)
+        # 前饋網路處理
+        ffn = FeedForward(
+            d_model=self.d_model,
+            dff=self.dff,
+            dropout_rate=self.dropout_rate
+        )(attention)
         
-        return attention
-    
+        # 分離回兩個機器人的特徵
+        robot1_coord = layers.Lambda(lambda x: x[:, 0, :])(ffn)
+        robot2_coord = layers.Lambda(lambda x: x[:, 1, :])(ffn)
+        
+        return robot1_coord, robot2_coord
+        
+    def _build_frontier_module(self, frontier_input, robot_state):
+        """構建frontier評估模塊"""
+        # Frontier特徵提取
+        x = layers.Dense(64, activation='relu')(frontier_input)
+        x = layers.Dropout(self.dropout_rate)(x)
+        
+        # 添加位置編碼
+        x = PositionalEncoding(self.max_frontiers, 64)(x)
+        
+        # 自注意力處理
+        attention = MultiHeadAttention(
+            d_model=64,
+            num_heads=4,
+            dropout_rate=self.dropout_rate
+        )([x, x, x])
+        
+        # 與機器人狀態結合
+        robot_state_expanded = layers.RepeatVector(self.max_frontiers)(robot_state)
+        combined = layers.Concatenate()([attention, robot_state_expanded])
+        
+        # BiLSTM處理序列關係
+        x = layers.Bidirectional(layers.LSTM(
+            32, 
+            return_sequences=True,
+            kernel_regularizer=regularizers.l2(0.01)
+        ))(combined)
+        
+        return x
+        
     def _build_model(self):
-        """構建改進的網路模型，保持原有輸入輸出接口"""
-        # 1. 輸入層
-        map_input = tf.keras.layers.Input(shape=self.input_shape, name='map_input')
-        frontier_input = tf.keras.layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
-        robot1_pos = tf.keras.layers.Input(shape=(2,), name='robot1_pos_input')
-        robot2_pos = tf.keras.layers.Input(shape=(2,), name='robot2_pos_input')
-        robot1_target = tf.keras.layers.Input(shape=(2,), name='robot1_target_input')
-        robot2_target = tf.keras.layers.Input(shape=(2,), name='robot2_target_input')
+        """構建完整的模型"""
+        # 輸入層
+        map_input = layers.Input(shape=self.input_shape, name='map_input')
+        frontier_input = layers.Input(
+            shape=(self.max_frontiers, 2),
+            name='frontier_input'
+        )
+        robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
+        robot2_pos = layers.Input(shape=(2,), name='robot2_pos_input')
+        robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
+        robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 2. 地圖特徵提取
-        # 2.1 主幹網絡
-        x = self._build_cnn_block(map_input, 32, 3)
-        x = tf.keras.layers.MaxPooling2D(2)(x)
-        x = self._build_cnn_block(x, 64, 3)
-        x = tf.keras.layers.MaxPooling2D(2)(x)
-        x = self._build_cnn_block(x, 128, 3)
+        # 1. 地圖感知處理
+        map_features = self._build_perception_module(map_input)
+        map_features_flat = layers.Flatten()(map_features)
         
-        # 2.2 全局特徵
-        map_features = tf.keras.layers.GlobalAveragePooling2D()(x)
-        map_features = tf.keras.layers.Dense(256, activation='relu')(map_features)
+        # 2. 機器人狀態編碼
+        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
+        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
         
-        # 3. Frontier特徵處理
-        frontier_features = tf.keras.layers.Dense(64, activation='relu')(frontier_input)
+        robot1_features = layers.Dense(
+            self.d_model,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot1_state)
+        robot2_features = layers.Dense(
+            self.d_model,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot2_state)
         
-        # 4. 為兩個機器人構建注意力
-        robot1_attention = self._build_frontier_attention(
-            frontier_input, robot1_pos, robot2_pos, robot2_target)  # 只關注robot2的目標
-    
-        robot2_attention = self._build_frontier_attention(
-            frontier_input, robot2_pos, robot1_pos, robot1_target)  # 只關注robot1的目標
+        # 3. 協調模塊
+        robot1_coord, robot2_coord = self._build_coordination_module(
+            robot1_features, robot2_features
+        )
         
-        # 5. 應用注意力
-        robot1_frontier_features = tf.keras.layers.Multiply()([frontier_features, robot1_attention])
-        robot2_frontier_features = tf.keras.layers.Multiply()([frontier_features, robot2_attention])
+        # 4. Frontier評估
+        robot1_frontier = self._build_frontier_module(frontier_input, robot1_coord)
+        robot2_frontier = self._build_frontier_module(frontier_input, robot2_coord)
         
-        # 6. 特徵聚合
-        robot1_frontier_context = tf.keras.layers.GlobalAveragePooling1D()(robot1_frontier_features)
-        robot2_frontier_context = tf.keras.layers.GlobalAveragePooling1D()(robot2_frontier_features)
+        # 5. 決策融合
+        # Robot 1 決策路徑
+        robot1_decision = layers.Concatenate()([
+            layers.Flatten()(robot1_frontier),
+            robot1_coord,
+            map_features_flat
+        ])
         
-        # 7. 位置和目標編碼
-        robot1_pos_encoding = tf.keras.layers.Dense(64, activation='relu')(robot1_pos)
-        robot2_pos_encoding = tf.keras.layers.Dense(64, activation='relu')(robot2_pos)
-        robot1_target_encoding = tf.keras.layers.Dense(64, activation='relu')(robot1_target)
-        robot2_target_encoding = tf.keras.layers.Dense(64, activation='relu')(robot2_target)
+        robot1_decision = layers.Dense(
+            512,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot1_decision)
+        robot1_decision = layers.Dropout(self.dropout_rate)(robot1_decision)
         
-        # 8. 特徵融合
-        robot1_combined = tf.concat([
-            map_features,
-            robot1_frontier_context,
-            robot1_pos_encoding,
-            robot2_pos_encoding,
-            robot1_target_encoding
-        ], axis=-1)
+        robot1_decision = layers.Dense(
+            256,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot1_decision)
+        robot1_decision = layers.Dropout(self.dropout_rate)(robot1_decision)
         
-        robot2_combined = tf.concat([
-            map_features,
-            robot2_frontier_context,
-            robot2_pos_encoding,
-            robot1_pos_encoding,
-            robot2_target_encoding
-        ], axis=-1)
+        # 添加注意力機制到最終決策
+        robot1_attention = layers.Dense(256, activation='tanh')(robot1_decision)
+        robot1_attention = layers.Dense(1, activation='sigmoid')(robot1_attention)
+        robot1_decision = layers.Multiply()([robot1_decision, robot1_attention])
         
-        # 9. 決策網絡
-        # Robot 1
-        robot1_hidden = tf.keras.layers.Dense(512, activation='relu')(robot1_combined)
-        robot1_hidden = tf.keras.layers.Dropout(0.2)(robot1_hidden)
-        robot1_hidden = tf.keras.layers.Dense(256, activation='relu')(robot1_hidden)
-        robot1_hidden = tf.keras.layers.Dropout(0.2)(robot1_hidden)
-        robot1_output = tf.keras.layers.Dense(self.max_frontiers)(robot1_hidden)
+        robot1_output = layers.Dense(
+            self.max_frontiers,
+            name='robot1',
+            kernel_initializer='glorot_uniform'
+        )(robot1_decision)
         
-        # Robot 2
-        robot2_hidden = tf.keras.layers.Dense(512, activation='relu')(robot2_combined)
-        robot2_hidden = tf.keras.layers.Dropout(0.2)(robot2_hidden)
-        robot2_hidden = tf.keras.layers.Dense(256, activation='relu')(robot2_hidden)
-        robot2_hidden = tf.keras.layers.Dropout(0.2)(robot2_hidden)
-        robot2_output = tf.keras.layers.Dense(self.max_frontiers)(robot2_hidden)
+        # Robot 2 決策路徑
+        robot2_decision = layers.Concatenate()([
+            layers.Flatten()(robot2_frontier),
+            robot2_coord,
+            map_features_flat
+        ])
         
-        # 10. 構建模型
-        model = tf.keras.Model(
+        robot2_decision = layers.Dense(
+            512,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot2_decision)
+        robot2_decision = layers.Dropout(self.dropout_rate)(robot2_decision)
+        
+        robot2_decision = layers.Dense(
+            256,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot2_decision)
+        robot2_decision = layers.Dropout(self.dropout_rate)(robot2_decision)
+        
+        # 添加注意力機制到最終決策
+        robot2_attention = layers.Dense(256, activation='tanh')(robot2_decision)
+        robot2_attention = layers.Dense(1, activation='sigmoid')(robot2_attention)
+        robot2_decision = layers.Multiply()([robot2_decision, robot2_attention])
+        
+        robot2_output = layers.Dense(
+            self.max_frontiers,
+            name='robot2',
+            kernel_initializer='glorot_uniform'
+        )(robot2_decision)
+        
+        # 構建最終模型
+        model = models.Model(
             inputs={
                 'map_input': map_input,
                 'frontier_input': frontier_input,
@@ -163,20 +454,52 @@ class MultiRobotNetworkModel:
             }
         )
         
-        # 11. 編譯模型
+        # 使用自定義的學習率調度器
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=0.001,
+            decay_steps=1000,
+            decay_rate=0.9
+        )
+        
+        # 編譯模型
         model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-            loss='mse'
+            optimizer=tf.keras.optimizers.Adam(
+                learning_rate=lr_schedule,
+                clipnorm=1.0,  # 梯度裁剪
+                beta_1=0.9,
+                beta_2=0.999,
+                epsilon=1e-7
+            ),
+            loss={
+                'robot1': self._huber_loss,
+                'robot2': self._huber_loss
+            }
         )
         
         return model
-    
+        
+    def _huber_loss(self, y_true, y_pred, delta=1.0):
+        """自定義的 Huber 損失函數"""
+        error = y_true - y_pred
+        is_small_error = tf.abs(error) <= delta
+        squared_loss = 0.5 * tf.square(error)
+        linear_loss = delta * tf.abs(error) - 0.5 * tf.square(delta)
+        return tf.reduce_mean(
+            tf.where(is_small_error, squared_loss, linear_loss)
+        )
+
     def update_target_model(self):
         """更新目標網路"""
-        self.target_model.set_weights(self.model.get_weights())
+        tau = 0.001  # 軟更新係數
+        weights = self.model.get_weights()
+        target_weights = self.target_model.get_weights()
+        for i in range(len(weights)):
+            target_weights[i] = tau * weights[i] + (1 - tau) * target_weights[i]
+        self.target_model.set_weights(target_weights)
     
     def predict(self, state, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target):
         """預測動作值"""
+        # 確保輸入形狀正確
         if len(state.shape) == 3:
             state = np.expand_dims(state, 0)
         if len(frontiers.shape) == 2:
@@ -190,20 +513,23 @@ class MultiRobotNetworkModel:
         if len(robot2_target.shape) == 1:
             robot2_target = np.expand_dims(robot2_target, 0)
             
-        return self.model.predict({
-            'map_input': state,
-            'frontier_input': frontiers,
-            'robot1_pos_input': robot1_pos,
-            'robot2_pos_input': robot2_pos,
-            'robot1_target_input': robot1_target,
-            'robot2_target_input': robot2_target
-        })
+        return self.model.predict(
+            {
+                'map_input': state,
+                'frontier_input': frontiers,
+                'robot1_pos_input': robot1_pos,
+                'robot2_pos_input': robot2_pos,
+                'robot1_target_input': robot1_target,
+                'robot2_target_input': robot2_target
+            },
+            verbose=0
+        )
     
     def train_on_batch(self, states, frontiers, robot1_pos, robot2_pos, 
                       robot1_target, robot2_target,
                       robot1_targets, robot2_targets):
         """訓練一個批次"""
-        return self.model.train_on_batch(
+        history = self.model.train_on_batch(
             {
                 'map_input': states,
                 'frontier_input': frontiers,
@@ -217,12 +543,42 @@ class MultiRobotNetworkModel:
                 'robot2': robot2_targets
             }
         )
+        return history
     
-    def save(self, path):
+    def save(self, filepath):
         """保存模型"""
-        self.model.save(path)
+        # 保存模型架構和權重
+        self.model.save(filepath)
+        # 保存額外的配置信息
+        config = {
+            'input_shape': self.input_shape,
+            'max_frontiers': self.max_frontiers,
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'dff': self.dff,
+            'dropout_rate': self.dropout_rate
+        }
+        with open(filepath + '_config.json', 'w') as f:
+            json.dump(config, f)
     
-    def load(self, path):
+    def load(self, filepath):
         """載入模型"""
-        self.model = tf.keras.models.load_model(path)
-        self.target_model = tf.keras.models.load_model(path)
+        # 創建自定義對象字典
+        custom_objects = {
+            'LayerNormalization': LayerNormalization,
+            'MultiHeadAttention': MultiHeadAttention,
+            'PositionalEncoding': PositionalEncoding,
+            'FeedForward': FeedForward,
+            'SpatialAttention': SpatialAttention,
+            '_huber_loss': self._huber_loss
+        }
+        
+        # 載入模型
+        self.model = models.load_model(
+            filepath,
+            custom_objects=custom_objects
+        )
+        self.target_model = models.load_model(
+            filepath,
+            custom_objects=custom_objects
+        )
