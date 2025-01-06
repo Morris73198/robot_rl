@@ -76,7 +76,7 @@ class MultiRobotTrainer:
         return normalized
     
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos):
-        """改進的動作選擇策略，保持原有接口"""
+        """改進的動作選擇策略"""
         if len(frontiers) == 0:
             return 0, 0
             
@@ -93,6 +93,10 @@ class MultiRobotTrainer:
             def get_valid_actions(robot_pos, other_pos, other_target=None):
                 """獲取有效的動作選擇"""
                 scores = []
+                pos_scale = np.array(self.map_size[::-1])  # 用於反歸一化位置
+                robot_pos = robot_pos * pos_scale
+                other_pos = other_pos * pos_scale
+                
                 for idx in valid_indices:
                     frontier = frontiers[idx]
                     
@@ -111,30 +115,41 @@ class MultiRobotTrainer:
                         if dist_to_other_target < MIN_TARGET_DISTANCE:
                             score *= (dist_to_other_target / MIN_TARGET_DISTANCE)
                     
-                    scores.append(score)
+                    scores.append(max(score, 1e-10))  # 確保分數不為0
                 
-                # 轉換分數為概率
+                # 轉換分數為概率，並處理極端情況
                 scores = np.array(scores)
-                probabilities = scores / np.sum(scores)
+                sum_scores = np.sum(scores)
+                
+                if sum_scores > 0:
+                    probabilities = scores / sum_scores
+                else:
+                    # 如果所有分數都是0，使用均勻分布
+                    probabilities = np.ones_like(scores) / len(scores)
+                
+                # 驗證概率的有效性
+                if np.any(np.isnan(probabilities)) or np.any(np.isinf(probabilities)):
+                    # 如果出現無效值，使用均勻分布
+                    probabilities = np.ones_like(scores) / len(scores)
                 
                 return np.random.choice(valid_indices, p=probabilities)
             
             # 為兩個機器人選擇動作
             robot1_action = get_valid_actions(
-                robot1_pos * self.map_size[::-1],  # 反歸一化位置
-                robot2_pos * self.map_size[::-1],
+                robot1_pos,
+                robot2_pos,
                 self.robot2.current_target_frontier
             )
             
             robot2_action = get_valid_actions(
-                robot2_pos * self.map_size[::-1],
-                robot1_pos * self.map_size[::-1],
+                robot2_pos,
+                robot1_pos,
                 frontiers[robot1_action]  # 使用剛選擇的robot1目標
             )
             
             return robot1_action, robot2_action
         
-        # 使用模型預測
+        # 使用模型預測的情況保持不變
         state_batch = np.expand_dims(state, 0)
         frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0)
         robot1_pos_batch = np.expand_dims(robot1_pos, 0)
@@ -164,11 +179,13 @@ class MultiRobotTrainer:
             """調整Q值以考慮協調因素"""
             adjusted_q = q_values.copy()
             pos_scale = np.array(self.map_size[::-1])  # 用於反歸一化位置
+            robot_pos = robot_pos * pos_scale
+            other_pos = other_pos * pos_scale
             
             for i in range(valid_frontiers):
                 frontier = frontiers[i]
                 # 計算與其他機器人的距離影響
-                dist_to_other = np.linalg.norm(frontier - (other_pos * pos_scale))
+                dist_to_other = np.linalg.norm(frontier - other_pos)
                 
                 # 如果太靠近其他機器人，降低Q值
                 if dist_to_other < MIN_TARGET_DISTANCE:
@@ -183,7 +200,7 @@ class MultiRobotTrainer:
                         adjusted_q[i] *= target_factor
                         
                 # 考慮到邊界的距離
-                dist_to_robot = np.linalg.norm(frontier - (robot_pos * pos_scale))
+                dist_to_robot = np.linalg.norm(frontier - robot_pos)
                 if dist_to_robot > self.robot1.sensor_range * 1.5:  # 避免選擇太遠的點
                     adjusted_q[i] *= 0.5
             
