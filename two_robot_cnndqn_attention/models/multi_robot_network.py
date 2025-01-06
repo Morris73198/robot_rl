@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 from tensorflow.keras import layers, models, regularizers
+import json
 
 class LayerNormalization(layers.Layer):
     """自定義層正規化層"""
