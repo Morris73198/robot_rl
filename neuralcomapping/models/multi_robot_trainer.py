@@ -3,78 +3,172 @@ import numpy as np
 from collections import deque
 import time
 import os
-import matplotlib
-matplotlib.use('TkAgg')  # 使用 TkAgg 後端
 import matplotlib.pyplot as plt
+import random
 
-class PPOBuffer:
-    """PPO 的經驗緩衝區"""
-    def __init__(self, num_steps, num_robots, num_envs, obs_shape, max_frontiers):
-        # 初始化緩衝區存儲
-        self.states = np.zeros((num_steps, num_envs, *obs_shape), dtype=np.float32)
-        self.frontiers = np.zeros((num_steps, num_robots, max_frontiers, 2), dtype=np.float32)
-        self.robot_poses = np.zeros((num_steps, num_robots, 2), dtype=np.float32)
-        self.robot_targets = np.zeros((num_steps, num_robots, 2), dtype=np.float32)
+
+class RobotVisualizer:
+    def __init__(self, robot1, robot2):
+        """初始化可視化器"""
+        self.robot1 = robot1
+        self.robot2 = robot2
         
-        self.actions = np.zeros((num_steps, num_robots), dtype=np.int32)
-        self.action_probs = np.zeros((num_steps, num_robots), dtype=np.float32)
-        self.rewards = np.zeros((num_steps, num_robots), dtype=np.float32)
-        self.values = np.zeros((num_steps, num_robots), dtype=np.float32)
-        self.dones = np.zeros((num_steps, num_robots), dtype=np.float32)
+        # 創建主圖和子圖
+        self.fig = plt.figure(figsize=(15, 8))
+        self.gs = self.fig.add_gridspec(2, 3)
         
-        self.num_steps = num_steps
-        self.num_robots = num_robots
-        self.num_envs = num_envs
-        self.step = 0
+        # 左側: 環境地圖
+        self.ax_map = self.fig.add_subplot(self.gs[:, 0:2])
         
-    def store(self, state, frontiers, robot_poses, robot_targets, 
-             actions, action_probs, rewards, values, dones):
-        """存儲一個時間步的經驗"""
-        # 處理狀態存儲
-        if state.shape[0] == 1:
-            state = np.repeat(state, self.num_envs, axis=0)
-        self.states[self.step] = state
+        # 右側上方: 探索進度條
+        self.ax_progress = self.fig.add_subplot(self.gs[0, 2])
         
-        # 確保所有數據都有正確的形狀
-        values = np.squeeze(values)  # 去除多餘的維度
-        if values.ndim == 1:
-            values = values.reshape(-1)  # 確保是一維數組
-            
-        dones = np.array(dones).reshape(-1)  # 確保是一維數組
+        # 右側下方: 路徑長度圖
+        self.ax_path = self.fig.add_subplot(self.gs[1, 2])
         
-        # 存儲其他數據
-        self.frontiers[self.step] = frontiers
-        self.robot_poses[self.step] = robot_poses
-        self.robot_targets[self.step] = robot_targets
-        self.actions[self.step] = np.array(actions)
-        self.action_probs[self.step] = np.array(action_probs)
-        self.rewards[self.step] = np.array(rewards)
-        self.values[self.step] = values
-        self.dones[self.step] = dones
+        # 設置互動模式
+        plt.ion()
         
-        self.step = (self.step + 1) % self.num_steps
+        # 初始化顏色方案
+        self.colors = {
+            'robot1': '#800080',  # 紫色
+            'robot2': '#FFA500',  # 橘色
+            'frontier': '#FF0000',  # 紅色
+            'unexplored': '#808080',  # 灰色
+            'explored': '#FFFFFF',  # 白色
+            'obstacle': '#000000',  # 黑色
+            'path1': '#9370DB',  # 淺紫色
+            'path2': '#FFB84D',  # 淺橘色
+        }
         
-    def get(self):
-        """Get all stored experience"""
-        return (self.states, self.frontiers, self.robot_poses, self.robot_targets,
-                self.actions, self.action_probs, self.rewards, self.values, self.dones)
-                
-    def clear(self):
-        """Clear the buffer"""
-        self.step = 0
+        # 路徑記錄
+        self.path_lengths = {'robot1': [], 'robot2': []}
+        self.steps = []
+        self.current_step = 0
+
+    def update(self):
+        """更新可視化"""
+        self._update_map()
+        self._update_progress()
+        self._update_path_lengths()
         
+        # 調整布局並刷新
+        self.fig.tight_layout()
+        plt.pause(0.01)
+
+    def _update_map(self):
+        """更新環境地圖視圖"""
+        self.ax_map.clear()
+        
+        # 繪製基礎地圖
+        map_data = self.robot1.op_map.copy()
+        self.ax_map.imshow(map_data, cmap='gray', origin='upper')
+        
+        # 繪製frontier點
+        frontiers = self.robot1.get_frontiers()
+        if len(frontiers) > 0:
+            self.ax_map.scatter(frontiers[:, 0], frontiers[:, 1],
+                              c=self.colors['frontier'], marker='*',
+                              s=100, label='Frontiers')
+        
+        # 繪製機器人1的路徑和位置
+        self.ax_map.plot(self.robot1.xPoint, self.robot1.yPoint,
+                        color=self.colors['path1'], linewidth=2,
+                        label='Robot1 Path', alpha=0.7)
+        self.ax_map.plot(self.robot1.robot_position[0], self.robot1.robot_position[1],
+                        'o', color=self.colors['robot1'], markersize=10,
+                        label='Robot1')
+        
+        if self.robot1.current_target_frontier is not None:
+            self.ax_map.plot([self.robot1.robot_position[0], self.robot1.current_target_frontier[0]],
+                           [self.robot1.robot_position[1], self.robot1.current_target_frontier[1]],
+                           '--', color=self.colors['robot1'], alpha=0.5)
+        
+        # 繪製機器人2的路徑和位置
+        self.ax_map.plot(self.robot2.xPoint, self.robot2.yPoint,
+                        color=self.colors['path2'], linewidth=2,
+                        label='Robot2 Path', alpha=0.7)
+        self.ax_map.plot(self.robot2.robot_position[0], self.robot2.robot_position[1],
+                        'o', color=self.colors['robot2'], markersize=10,
+                        label='Robot2')
+        
+        if self.robot2.current_target_frontier is not None:
+            self.ax_map.plot([self.robot2.robot_position[0], self.robot2.current_target_frontier[0]],
+                           [self.robot2.robot_position[1], self.robot2.current_target_frontier[1]],
+                           '--', color=self.colors['robot2'], alpha=0.5)
+        
+        self.ax_map.legend(loc='upper left', bbox_to_anchor=(1.05, 1.0))
+        self.ax_map.set_title('Environment Map')
+        self.ax_map.axis('equal')
+
+    def _update_progress(self):
+        """更新探索進度條"""
+        self.ax_progress.clear()
+        
+        # 計算探索進度
+        progress = self.robot1.get_exploration_progress()
+        
+        # 繪製進度條
+        self.ax_progress.barh(0, progress, color=self.colors['robot1'])
+        self.ax_progress.barh(0, 1, color=self.colors['unexplored'], alpha=0.3)
+        
+        self.ax_progress.set_title('Exploration Progress')
+        self.ax_progress.set_xlim(0, 1)
+        self.ax_progress.set_ylim(-0.5, 0.5)
+        self.ax_progress.text(0.5, 0, f'{progress:.1%}',
+                            horizontalalignment='center',
+                            verticalalignment='center')
+        self.ax_progress.set_yticks([])
+
+    def _update_path_lengths(self):
+        """更新路徑長度圖"""
+        self.ax_path.clear()
+        
+        # 計算並記錄路徑長度
+        robot1_length = len(self.robot1.xPoint)
+        robot2_length = len(self.robot2.xPoint)
+        
+        self.path_lengths['robot1'].append(robot1_length)
+        self.path_lengths['robot2'].append(robot2_length)
+        
+        self.current_step += 1
+        self.steps.append(self.current_step)
+        
+        self.ax_path.plot(self.steps, self.path_lengths['robot1'],
+                         color=self.colors['robot1'], label='Robot1')
+        self.ax_path.plot(self.steps, self.path_lengths['robot2'],
+                         color=self.colors['robot2'], label='Robot2')
+        
+        self.ax_path.set_title('Path Length')
+        self.ax_path.set_xlabel('Steps')
+        self.ax_path.set_ylabel('Length')
+        self.ax_path.legend()
+        self.ax_path.grid(True)
+
+    def save(self, filename='exploration_visualization.png'):
+        """保存當前視圖"""
+        self.fig.savefig(filename, bbox_inches='tight', dpi=300)
+
+    def close(self):
+        """清理資源"""
+        plt.ioff()
+        plt.close(self.fig)
+
+
 class MultiRobotTrainer:
     def __init__(self, network, robots, log_dir,
                  num_steps=128, num_envs=1,
                  learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
                  clip_ratio=0.2, value_loss_coef=0.5, entropy_coef=0.01,
-                 max_grad_norm=0.5, num_epochs=10):
+                 max_grad_norm=0.5, num_epochs=10, 
+                 memory_size=10000, batch_size=32):
         
         self.network = network
         self.robots = robots
         self.num_robots = len(robots)
         self.num_steps = num_steps
         self.num_envs = num_envs
+        self.max_frontiers = 50
         
         # Training parameters
         self.learning_rate = learning_rate
@@ -85,89 +179,147 @@ class MultiRobotTrainer:
         self.entropy_coef = entropy_coef
         self.max_grad_norm = max_grad_norm
         self.num_epochs = num_epochs
+        self.batch_size = batch_size
         
-        # Initialize optimizer
+        # Experience buffer
+        self.memory = deque(maxlen=memory_size)
+        
+        # Optimizer
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         
-        # Initialize experience buffer
-        obs_shape = robots[0].get_observation().shape
-        self.buffer = PPOBuffer(
-            num_steps=num_steps,
-            num_robots=self.num_robots,
-            num_envs=num_envs,
-            obs_shape=obs_shape,
-            max_frontiers=50
-        )
+        # Exploration parameters
+        self.epsilon = 1.0
+        self.epsilon_min = 0.1
+        self.epsilon_decay = 0.995
         
         # Setup logging
         self.summary_writer = tf.summary.create_file_writer(log_dir)
-        self.episode_rewards = deque(maxlen=10)
-        self.total_steps = 0
+        self.training_history = {
+            'episode_rewards': [],
+            'robot1_rewards': [],
+            'robot2_rewards': [],
+            'episode_lengths': [],
+            'exploration_rates': [],
+            'losses': [],
+            'exploration_progress': []
+        }
         
-        # Setup visualization
-        plt.ion()  # Enable interactive mode for visualization
-        
-    def compute_advantages(self, buffer_data, final_values):
-        """Compute GAE advantages
-        
-        Args:
-            buffer_data: Tuple of (states, frontiers, robot_poses, robot_targets,
-                                actions, action_probs, rewards, values, dones)
-            final_values: Final value estimates for each robot
-            
-        Returns:
-            advantages: Array of shape [num_steps, num_robots]
-            returns: Array of shape [num_steps, num_robots]
-        """
-        # Unpack buffer data
-        _, _, _, _, _, _, rewards, values, dones = buffer_data
-        
-        # Initialize arrays
-        advantages = np.zeros_like(rewards)  # [num_steps, num_robots]
-        last_gae = np.zeros(self.num_robots)  # [num_robots]
-        
-        # Ensure proper shapes
-        final_values = np.squeeze(final_values)  # Remove extra dimensions
-        if final_values.ndim == 0:
-            final_values = np.array([final_values])
-        
-        # GAE calculation
-        for t in reversed(range(self.num_steps)):
-            if t == self.num_steps - 1:
-                next_non_terminal = 1.0 - dones[t]
-                next_value = final_values
-            else:
-                next_non_terminal = 1.0 - dones[t + 1]
-                next_value = values[t + 1]
-                
-            delta = rewards[t] + self.gamma * next_value * next_non_terminal - values[t]
-            last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
-            advantages[t] = last_gae.copy()
-        
-        # Calculate returns
-        returns = advantages + values
-        
-        # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        return advantages, returns
+        # Initialize visualizer
+        self.visualizer = RobotVisualizer(robots[0], robots[1])
 
+    def pad_frontiers(self, frontiers):
+        """Pad and normalize frontiers"""
+        padded = np.zeros((self.max_frontiers, 2), dtype=np.float32)  # 明確指定float32類型
+        if len(frontiers) > 0:
+            frontiers = np.array(frontiers, dtype=np.float32)  # 轉換輸入為float32
+            n_frontiers = min(len(frontiers), self.max_frontiers)
+            # 正規化座標
+            normalized_frontiers = frontiers[:n_frontiers].copy()
+            normalized_frontiers[:, 0] = frontiers[:n_frontiers, 0] / float(self.robots[0].map_size[1])
+            normalized_frontiers[:, 1] = frontiers[:n_frontiers, 1] / float(self.robots[0].map_size[0])
+            padded[:n_frontiers] = normalized_frontiers
+        return padded
+
+    def get_normalized_target(self, target):
+        """Normalize target coordinates"""
+        if target is None:
+            return np.array([0.0, 0.0])
+        return np.array([
+            target[0] / float(self.robots[0].map_size[1]),
+            target[1] / float(self.robots[0].map_size[0])
+        ])
+
+    def choose_actions(self, state, frontiers, robot_poses, robot_targets):
+        """Choose actions for both robots"""
+        if len(frontiers) == 0:
+            return 0, 0
+
+        if np.random.random() < self.epsilon:
+            valid_frontiers = list(range(min(self.max_frontiers, len(frontiers))))
+            return np.random.choice(valid_frontiers), np.random.choice(valid_frontiers)
+
+        # Use network for prediction
+        state_tensor = tf.convert_to_tensor(state[None], dtype=tf.float32)
+        frontiers_tensor = tf.convert_to_tensor(
+            self.pad_frontiers(frontiers)[None], dtype=tf.float32)
+        robot_poses_tensor = tf.convert_to_tensor(robot_poses[None], dtype=tf.float32)
+        robot_targets_tensor = tf.convert_to_tensor(robot_targets[None], dtype=tf.float32)
+
+        policy_logits, _ = self.network(
+            [state_tensor, frontiers_tensor, robot_poses_tensor, robot_targets_tensor],
+            training=False
+        )
+
+    def print_progress(self, episode, num_episodes, total_reward,
+                      robot1_reward, robot2_reward, steps, episode_losses):
+        """Print training progress"""
+        print(f"\nEpisode {episode + 1}/{num_episodes}")
+        print(f"Map: {self.robots[0].li_map}")
+        print(f"Steps: {steps}")
+        print(f"Total reward: {total_reward:.2f}")
+        print(f"Robot1 reward: {robot1_reward:.2f}")
+        print(f"Robot2 reward: {robot2_reward:.2f}")
+        print(f"Epsilon: {self.epsilon:.3f}")
+        print(f"Average loss: {np.mean(episode_losses) if episode_losses else 0:.6f}")
+        print(f"Exploration progress: {self.robots[0].get_exploration_progress():.1%}")
+        print("-" * 50)
+
+    def plot_training_progress(self):
+        """Plot training metrics"""
+        fig, axs = plt.subplots(6, 1, figsize=(12, 20))
+        episodes = range(1, len(self.training_history['episode_rewards']) + 1)
+        
+        # Total rewards
+        axs[0].plot(episodes, self.training_history['episode_rewards'],
+                   color='#4B0082')
+        axs[0].set_title('Total Rewards')
+        axs[0].set_xlabel('Episodes')
+        axs[0].set_ylabel('Reward')
+        axs[0].grid(True)
+        
+        # Individual robot rewards
+        axs[1].plot(episodes, self.training_history['robot1_rewards'],
+                   color='#800080', label='Robot1', alpha=0.8)
+        axs[1].plot(episodes, self.training_history['robot2_rewards'],
+                   color='#FFA500', label='Robot2', alpha=0.8)
+        axs[1].set_title('Robot Rewards')
+        axs[1].set_xlabel('Episodes')
+        axs[1].set_ylabel('Reward')
+        axs[1].legend()
+        axs[1].grid(True)
+        
+        # Episode lengths
+        axs[2].plot(episodes, self.training_history['episode_lengths'],
+                   color='#4169E1')
+        axs[2].set_title('Episode Lengths')
+        axs[2].set_xlabel('Episodes')
+        axs[2].set_ylabel('Steps')
+        axs[2].grid(True)
+        
+        # Exploration rate
+        axs[3].plot(episodes, self.training_history['exploration_rates'],
+                   color='#228B22')
+        axs[3].set_title('Exploration Rate')
+        axs[3].set_xlabel('Episodes')
+        axs[3].set_ylabel('Epsilon')
+        axs[3].grid(True)
+        
+        # Training loss
+        ax
+
+        valid_frontiers = min(self.max_frontiers, len(frontiers))
+        robot1_logits = policy_logits[0][0, :valid_frontiers]
+        robot2_logits = policy_logits[1][0, :valid_frontiers]
+
+        robot1_action = tf.argmax(robot1_logits).numpy()
+        robot2_action = tf.argmax(robot2_logits).numpy()
+
+        return robot1_action, robot2_action
 
     @tf.function
-    def train_step(self, states, frontiers, robot_poses, robot_targets, 
-               actions, old_probs, advantages, returns):
-        """Execute one training step with proper shape handling
-        
-        Args:
-            states: State tensor [batch_size, height, width, channels]
-            frontiers: Frontiers tensor [batch_size, num_robots, max_frontiers, 2]
-            robot_poses: Robot positions [batch_size, num_robots, 2]
-            robot_targets: Target positions [batch_size, num_robots, 2]
-            actions: Action indices [batch_size, num_robots]
-            old_probs: Old action probabilities [batch_size, num_robots]
-            advantages: Advantage estimates [batch_size, num_robots]
-            returns: Return estimates [batch_size, num_robots]
-        """
+    def _train_step(self, states, frontiers, robot_poses, robot_targets,
+                   actions, old_probs, advantages, returns):
+        """Execute single training step"""
         with tf.GradientTape() as tape:
             # Forward pass
             policy_logits, values = self.network(
@@ -179,328 +331,395 @@ class MultiRobotTrainer:
             policy_loss = 0
             value_loss = 0
             entropy_loss = 0
-            
+
             # Calculate losses for each robot
             for i in range(self.num_robots):
-                # Get policy logits for current robot
-                robot_logits = policy_logits[i]  # [batch_size, num_frontiers]
-                num_frontiers = tf.shape(robot_logits)[1]
+                # Get policy logits and probabilities
+                logits = policy_logits[i]
+                probs = tf.nn.softmax(logits)
                 
-                # Ensure num_frontiers is not None and > 0
-                num_frontiers = tf.maximum(num_frontiers, 1)
+                # Calculate action probabilities
+                action_masks = tf.one_hot(actions[:, i], tf.shape(logits)[1])
+                action_probs = tf.reduce_sum(probs * action_masks, axis=1)
                 
-                # Handle actions for this robot
-                robot_actions = actions[:, i]  # [batch_size]
-                
-                # Create one-hot actions with explicit depth
-                action_one_hot = tf.one_hot(robot_actions, num_frontiers)  # [batch_size, num_frontiers]
-                
-                # Calculate probabilities
-                probs = tf.nn.softmax(robot_logits)  # [batch_size, num_frontiers]
-                
-                # Calculate log probabilities for taken actions
-                action_probs = tf.reduce_sum(probs * action_one_hot, axis=-1)  # [batch_size]
-                log_probs = tf.math.log(action_probs + 1e-10)  # Add small epsilon to avoid log(0)
-                
-                # Calculate probability ratio
-                ratio = tf.exp(log_probs - old_probs[:, i])
-                
-                # Calculate surrogate objectives
+                # Calculate ratio and surrogate objectives
+                ratio = action_probs / (old_probs[:, i] + 1e-8)
                 surrogate1 = ratio * advantages[:, i]
                 surrogate2 = tf.clip_by_value(
-                    ratio, 
-                    1.0 - self.clip_ratio, 
+                    ratio,
+                    1.0 - self.clip_ratio,
                     1.0 + self.clip_ratio
                 ) * advantages[:, i]
                 
-                # Calculate policy loss
+                # Policy loss
                 policy_loss += -tf.reduce_mean(tf.minimum(surrogate1, surrogate2))
                 
-                # Calculate value loss
+                # Value loss
                 value_pred = values[i]
-                value_loss += 0.5 * tf.reduce_mean(tf.square(returns[:, i] - value_pred))
+                value_loss += 0.5 * tf.reduce_mean(
+                    tf.square(returns[:, i] - value_pred))
                 
-                # Calculate entropy loss for exploration
+                # Entropy loss
                 entropy_loss += -tf.reduce_mean(
-                    tf.reduce_sum(probs * tf.math.log(probs + 1e-10), axis=-1)
-                )
-            
-            # Combine losses with coefficients
+                    tf.reduce_sum(probs * tf.math.log(probs + 1e-8), axis=1))
+
+            # Combine losses
             total_loss = (policy_loss + 
-                        self.value_loss_coef * value_loss - 
-                        self.entropy_coef * entropy_loss)
-        
+                         self.value_loss_coef * value_loss -
+                         self.entropy_coef * entropy_loss)
+
         # Compute and apply gradients
         grads = tape.gradient(total_loss, self.network.trainable_variables)
         if self.max_grad_norm is not None:
             grads, _ = tf.clip_by_global_norm(grads, self.max_grad_norm)
         self.optimizer.apply_gradients(zip(grads, self.network.trainable_variables))
-        
+
         return total_loss, policy_loss, value_loss, entropy_loss
 
+    def remember(self, state, frontiers, robot_poses, robot_targets,
+                actions, rewards, next_state, next_frontiers,
+                next_robot_poses, next_robot_targets, done):
+        """Store experience in memory"""
+        self.memory.append((
+            state, frontiers, robot_poses, robot_targets,
+            actions, rewards, next_state, next_frontiers,
+            next_robot_poses, next_robot_targets, done
+        ))
+
+    def train_step(self):
+        """Execute training on a batch of experiences"""
+        if len(self.memory) < self.batch_size:
+            return None
+            
+        # Sample batch
+        batch = random.sample(self.memory, self.batch_size)
+        
+        # Prepare batch data
+        states = []
+        frontiers_batch = []
+        robot_poses_batch = []
+        robot_targets_batch = []
+        actions_batch = []
+        rewards_batch = []
+        next_states = []
+        next_frontiers_batch = []
+        next_robot_poses_batch = []
+        next_robot_targets_batch = []
+        dones = []
+        
+        for experience in batch:
+            (state, frontiers, robot_poses, robot_targets,
+             actions, rewards, next_state, next_frontiers,
+             next_robot_poses, next_robot_targets, done) = experience
+            
+            states.append(state)
+            frontiers_batch.append(self.pad_frontiers(frontiers))
+            robot_poses_batch.append(robot_poses)
+            robot_targets_batch.append(robot_targets)
+            actions_batch.append(actions)
+            rewards_batch.append(rewards)
+            next_states.append(next_state)
+            next_frontiers_batch.append(self.pad_frontiers(next_frontiers))
+            next_robot_poses_batch.append(next_robot_poses)
+            next_robot_targets_batch.append(next_robot_targets)
+            dones.append(done)
+            
+        # Convert to numpy arrays
+        states = np.array(states)
+        frontiers_batch = np.array(frontiers_batch)
+        robot_poses_batch = np.array(robot_poses_batch)
+        robot_targets_batch = np.array(robot_targets_batch)
+        actions_batch = np.array(actions_batch)
+        rewards_batch = np.array(rewards_batch)
+        next_states = np.array(next_states)
+        next_frontiers_batch = np.array(next_frontiers_batch)
+        next_robot_poses_batch = np.array(next_robot_poses_batch)
+        next_robot_targets_batch = np.array(next_robot_targets_batch)
+        dones = np.array(dones)
+        
+        # Convert tensors
+        states_tensor = tf.convert_to_tensor(states, dtype=tf.float32)
+        frontiers_tensor = tf.convert_to_tensor(frontiers_batch, dtype=tf.float32)
+        robot_poses_tensor = tf.convert_to_tensor(robot_poses_batch, dtype=tf.float32)
+        robot_targets_tensor = tf.convert_to_tensor(robot_targets_batch, dtype=tf.float32)
+        
+        # Get current policy probabilities and values
+        policy_logits, values = self.network(
+            [states_tensor, frontiers_tensor, robot_poses_tensor, robot_targets_tensor],
+            training=False
+        )
+        
+        # Get next state values
+        next_policy_logits, next_values = self.network(
+            [
+                tf.convert_to_tensor(next_states, dtype=tf.float32),
+                tf.convert_to_tensor(next_frontiers_batch, dtype=tf.float32),
+                tf.convert_to_tensor(next_robot_poses_batch, dtype=tf.float32),
+                tf.convert_to_tensor(next_robot_targets_batch, dtype=tf.float32)
+            ],
+            training=False
+        )
+        
+        # Calculate advantages and returns
+        advantages = np.zeros((self.batch_size, self.num_robots))
+        returns = np.zeros((self.batch_size, self.num_robots))
+        
+        # Calculate for each robot
+        for i in range(self.num_robots):
+            current_values = values[i].numpy().flatten()
+            next_state_values = next_values[i].numpy().flatten()
+            robot_rewards = rewards_batch[:, i]
+            
+            # Calculate TD error and advantages
+            delta = (robot_rewards + 
+                    self.gamma * next_state_values * (1 - dones) - 
+                    current_values)
+            advantages[:, i] = delta
+            returns[:, i] = current_values + advantages[:, i]
+        
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Get old action probabilities
+        old_probs = np.zeros((self.batch_size, self.num_robots))
+        for i in range(self.num_robots):
+            probs = tf.nn.softmax(policy_logits[i]).numpy()
+            for j in range(self.batch_size):
+                if actions_batch[j, i] < probs.shape[1]:
+                    old_probs[j, i] = probs[j, actions_batch[j, i]]
+                else:
+                    old_probs[j, i] = 1e-8
+        
+        # Execute training step
+        loss = self._train_step(
+            states_tensor,
+            frontiers_tensor,
+            robot_poses_tensor,
+            robot_targets_tensor,
+            actions_batch,
+            old_probs,
+            advantages,
+            returns
+        )
+        
+        return loss
 
     def train(self, num_episodes=1000):
-        """基於完整地圖探索的訓練循環
-        
-        Args:
-            num_episodes: 要訓練的地圖數量
-        """
+        """Execute training loop"""
         try:
-            print("開始訓練...")
+            print("Starting training...")
             start_time = time.time()
             
-            # 設置可視化間隔
-            VIZ_INTERVAL = 5  # 每隔5步更新一次可視化
-            PRINT_INTERVAL = 1  # 每完成一張地圖打印一次進度
-            
-            # 確保所有機器人的可視化設置正確
-            for robot in self.robots:
-                robot.plot = True
-                if not hasattr(robot, 'fig'):
-                    robot.initialize_visualization()
-                    
             for episode in range(num_episodes):
-                print(f"\n開始探索第 {episode + 1} 張地圖")
+                # Initialize environment
+                state = self.robots[0].begin()
+                self.robots[1].begin()
                 
-                # 初始化/重置環境
-                state = self.robots[0].reset() if episode > 0 else self.robots[0].begin()
-                if episode > 0:
-                    self.robots[1].reset()
-                else:
-                    self.robots[1].begin()
-                    
-                episode_steps = 0
-                episode_rewards = [0] * self.num_robots
-                episode_buffer = []
+                # Episode statistics
+                total_reward = 0
+                robot1_total_reward = 0
+                robot2_total_reward = 0
+                steps = 0
+                episode_losses = []
                 
-                # 探索單張地圖直到完成
+                # Main training loop
                 while True:
-                    # 前向傳遞和動作選擇
-                    state_tensor = tf.convert_to_tensor(state[None], dtype=tf.float32)
-                    frontiers = self.get_frontiers()
-                    robot_poses = self.get_robot_poses()
-                    robot_targets = self.get_robot_targets()
+                    # Get current state info
+                    frontiers = self.robots[0].get_frontiers()
+                    if len(frontiers) == 0:
+                        break
+                        
+                    robot_poses = np.array([
+                        robot.get_normalized_position() for robot in self.robots
+                    ])
+                    robot_targets = np.array([
+                        self.get_normalized_target(robot.current_target_frontier)
+                        for robot in self.robots
+                    ])
                     
-                    frontiers_tensor = tf.convert_to_tensor(frontiers[None], dtype=tf.float32)
-                    robot_poses_tensor = tf.convert_to_tensor(robot_poses[None], dtype=tf.float32)
-                    robot_targets_tensor = tf.convert_to_tensor(robot_targets[None], dtype=tf.float32)
+                    # Choose and execute actions
+                    robot1_action, robot2_action = self.choose_actions(
+                        state, frontiers, robot_poses, robot_targets)
                     
-                    policy_logits, values = self.network(
-                        [state_tensor, frontiers_tensor, robot_poses_tensor, robot_targets_tensor],
-                        training=False
-                    )
-                    
-                    # 為每個機器人採樣動作
-                    actions = []
-                    action_probs = []
-                    for i in range(self.num_robots):
-                        probs = tf.nn.softmax(policy_logits[i][0]).numpy()
-                        if len(probs) > 0:
-                            action = np.random.choice(len(probs), p=probs)
-                            actions.append(action)
-                            action_probs.append(probs[action])
-                        else:
-                            actions.append(0)
-                            action_probs.append(1.0)
-                    
-                    # 執行動作並獲取獎勵
-                    rewards = []
-                    dones = []
-                    next_states = []
-                    
-                    for i, robot in enumerate(self.robots):
-                        robot_frontiers = robot.get_frontiers()
-                        if len(robot_frontiers) > 0 and actions[i] < len(robot_frontiers):
-                            next_state, reward, done = robot.move_to_frontier(
-                                robot_frontiers[actions[i]])
-                        else:
-                            next_state = state
-                            reward = 0.0
-                            done = True
-                            
-                        next_states.append(next_state)
-                        rewards.append(reward)
-                        dones.append(done)
-                        episode_rewards[i] += reward
-                    
-                    # 更新機器人之間共享的地圖
-                    self.robots[0].op_map = np.maximum(
-                        self.robots[0].op_map, self.robots[1].op_map)
+                    # Execute actions and get rewards
+                    if len(frontiers) > robot1_action:
+                        next_state1, r1, d1 = self.robots[0].move_to_frontier(
+                            frontiers[robot1_action])
+                        robot1_reward = r1
+                    else:
+                        next_state1 = state
+                        robot1_reward = 0
+                        d1 = True
+                        
+                    # Update shared map
                     self.robots[1].op_map = self.robots[0].op_map.copy()
                     
-                    # 存儲當前步驟的經驗
-                    value_array = np.array([v[0].numpy() for v in values])
-                    value_array = np.squeeze(value_array)
-                    step_data = (state, frontiers, robot_poses, robot_targets,
-                            np.array(actions), np.array(action_probs),
-                            np.array(rewards), value_array, np.array(dones))
-                    episode_buffer.append(step_data)
+                    if len(frontiers) > robot2_action:
+                        next_state2, r2, d2 = self.robots[1].move_to_frontier(
+                            frontiers[robot2_action])
+                        robot2_reward = r2
+                    else:
+                        next_state2 = state
+                        robot2_reward = 0
+                        d2 = True
                     
-                    # 更新狀態
-                    state = next_states[0]
-                    episode_steps += 1
-                    self.total_steps += 1
+                    # Sync maps between robots
+                    self.robots[0].op_map = self.robots[1].op_map.copy()
                     
-                    # 可視化更新
-                    if episode_steps % VIZ_INTERVAL == 0:
-                        for robot in self.robots:
-                            if hasattr(robot, 'plot_env'):
-                                robot.plot_env()
-                        plt.pause(0.001)
+                    # Get next state info
+                    next_frontiers = self.robots[0].get_frontiers()
+                    next_robot_poses = np.array([
+                        robot.get_normalized_position() for robot in self.robots
+                    ])
+                    next_robot_targets = np.array([
+                        self.get_normalized_target(robot.current_target_frontier)
+                        for robot in self.robots
+                    ])
                     
-                    # 檢查是否完成當前地圖
-                    exploration_progress = self.robots[0].get_exploration_progress()
-                    if exploration_progress > self.robots[0].finish_percent:
-                        print(f"地圖探索完成! 進度: {exploration_progress:.2%}")
-                        break
-                    
-                    # 如果步數過多，也結束當前地圖
-                    if episode_steps >= 1000:  # 可以調整這個閾值
-                        print("達到最大步數限制，結束當前地圖")
-                        break
-                
-                # 在每張地圖完成後進行策略更新
-                if len(episode_buffer) > 0:
-                    # 將 episode buffer 中的數據轉移到 PPO buffer
-                    for step_data in episode_buffer:
-                        self.buffer.store(*step_data)
-                    
-                    # 計算優勢和進行策略更新
-                    buffer_data = self.buffer.get()
-                    advantages, returns = self.compute_advantages(buffer_data, value_array)
-                    
-                    # 執行多次策略更新
-                    total_loss = 0
-                    policy_loss = 0
-                    value_loss = 0
-                    entropy_loss = 0
-                    
-                    # 準備訓練數據
-                    states_tensor = tf.convert_to_tensor(buffer_data[0], dtype=tf.float32)
-                    frontiers_tensor = tf.convert_to_tensor(buffer_data[1], dtype=tf.float32)
-                    robot_poses_tensor = tf.convert_to_tensor(buffer_data[2], dtype=tf.float32)
-                    robot_targets_tensor = tf.convert_to_tensor(buffer_data[3], dtype=tf.float32)
-                    actions_tensor = tf.convert_to_tensor(buffer_data[4], dtype=tf.int32)
-                    old_probs_tensor = tf.convert_to_tensor(buffer_data[5], dtype=tf.float32)
-                    advantages_tensor = tf.convert_to_tensor(advantages, dtype=tf.float32)
-                    returns_tensor = tf.convert_to_tensor(returns, dtype=tf.float32)
-                    
-                    for epoch in range(self.num_epochs):
-                        losses = self.train_step(
-                            states_tensor,
-                            frontiers_tensor,
-                            robot_poses_tensor,
-                            robot_targets_tensor,
-                            actions_tensor,
-                            old_probs_tensor,
-                            advantages_tensor,
-                            returns_tensor
+                    # Store experience
+                    if d1 or d2:
+                        self.remember(
+                            state, frontiers, robot_poses, robot_targets,
+                            [robot1_action, robot2_action],
+                            [robot1_reward, robot2_reward],
+                            next_state1,
+                            next_frontiers,
+                            next_robot_poses,
+                            next_robot_targets,
+                            d1 or d2
                         )
                         
-                        total_loss += losses[0]
-                        policy_loss += losses[1]
-                        value_loss += losses[2]
-                        entropy_loss += losses[3]
+                        # Train on batch
+                        loss = self.train_step()
+                        if loss is not None:
+                            episode_losses.append(loss)
                     
-                    # 平均損失
-                    total_loss /= self.num_epochs
-                    policy_loss /= self.num_epochs
-                    value_loss /= self.num_epochs
-                    entropy_loss /= self.num_epochs
-                
-                # 打印每張地圖的完成情況
-                if (episode + 1) % PRINT_INTERVAL == 0:
-                    elapsed_time = time.time() - start_time
-                    print(f"\n完成第 {episode + 1}/{num_episodes} 張地圖")
-                    print(f"本張地圖步數: {episode_steps}")
-                    print(f"本張地圖獎勵: {np.mean(episode_rewards):.2f}")
-                    print(f"總損失: {total_loss:.4f}")
-                    print(f"策略損失: {policy_loss:.4f}")
-                    print(f"價值損失: {value_loss:.4f}")
-                    print(f"熵損失: {entropy_loss:.4f}")
-                    print(f"已用時間: {elapsed_time:.1f}秒")
+                    # Update state and rewards
+                    state = next_state1
+                    total_reward += (robot1_reward + robot2_reward)
+                    robot1_total_reward += robot1_reward
+                    robot2_total_reward += robot2_reward
+                    steps += 1
                     
-                    # 記錄到 TensorBoard
-                    with self.summary_writer.as_default():
-                        tf.summary.scalar('episode/steps', episode_steps, step=episode)
-                        tf.summary.scalar('episode/mean_reward', np.mean(episode_rewards), step=episode)
-                        tf.summary.scalar('loss/total', total_loss, step=episode)
-                        tf.summary.scalar('loss/policy', policy_loss, step=episode)
-                        tf.summary.scalar('loss/value', value_loss, step=episode)
-                        tf.summary.scalar('loss/entropy', entropy_loss, step=episode)
+                    # Update visualization
+                    if steps % 5 == 0:  # 每5步更新一次
+                        self.visualizer.update()
+                    
+                    # Check if exploration is complete
+                    if (self.robots[0].get_exploration_progress() > 
+                        self.robots[0].finish_percent):
+                        # Save final state visualization
+                        self.visualizer.save(f'exploration_final_ep{episode+1}.png')
+                        break
                 
-                # 保存檢查點
+                # End of episode updates
+                self.update_training_history(
+                    total_reward, robot1_total_reward, robot2_total_reward,
+                    steps, episode_losses
+                )
+                
+                # Decay epsilon
+                if self.epsilon > self.epsilon_min:
+                    self.epsilon *= self.epsilon_decay
+                
+                # Print progress
+                self.print_progress(episode, num_episodes, total_reward,
+                                  robot1_total_reward, robot2_total_reward,
+                                  steps, episode_losses)
+                
+                # Save periodic checkpoints and visualizations
                 if (episode + 1) % 10 == 0:
-                    self.save_model(f'model_checkpoint_{episode+1}.h5')
+                    self.save_checkpoint(episode + 1)
+                    self.plot_training_progress()
+                    self.visualizer.save(f'exploration_ep{episode+1}.png')
                 
-                # 清理緩衝區
-                self.buffer.clear()
-                
-            print(f"\n訓練完成! 總共完成 {num_episodes} 張地圖")
+                # Reset for next episode
+                state = self.robots[0].reset()
+                self.robots[1].reset()
             
         except KeyboardInterrupt:
-            print("\n訓練被中斷!")
-            self.save_model('model_interrupted.h5')
+            print("\nTraining interrupted!")
+            self.save_checkpoint('interrupted')
+            self.visualizer.save('exploration_interrupted.png')
             
         except Exception as e:
-            print(f"\n訓練過程中出現錯誤: {str(e)}")
+            print(f"\nError during training: {str(e)}")
             import traceback
             traceback.print_exc()
-            raise e
             
         finally:
-            # 最終清理
-            plt.ioff()
+            # Clean up
+            self.visualizer.close()
             for robot in self.robots:
                 if hasattr(robot, 'cleanup_visualization'):
                     robot.cleanup_visualization()
             
-            # 最終保存
-            self.save_model('model_final.h5')
-            
-    def __del__(self):
-        """清理資源"""
-        plt.ioff()
-        for robot in self.robots:
-            if hasattr(robot, 'cleanup_visualization'):
-                robot.cleanup_visualization()
-    
-    def get_frontiers(self):
-        """Get current frontiers from all robots with padding"""
-        max_frontiers = 50  # Maximum number of frontiers to consider
-        frontiers_array = np.zeros((len(self.robots), max_frontiers, 2), dtype=np.float32)
+            # Save final model and results
+            self.save_checkpoint('final')
+
+    def update_training_history(self, total_reward, robot1_reward, robot2_reward,
+                              steps, episode_losses):
+        """Update training history with episode results"""
+        self.training_history['episode_rewards'].append(total_reward)
+        self.training_history['robot1_rewards'].append(robot1_reward)
+        self.training_history['robot2_rewards'].append(robot2_reward)
+        self.training_history['episode_lengths'].append(steps)
+        self.training_history['exploration_rates'].append(self.epsilon)
+        self.training_history['losses'].append(
+            np.mean(episode_losses) if episode_losses else 0
+        )
+        self.training_history['exploration_progress'].append(
+            self.robots[0].get_exploration_progress()
+        )
         
-        for i, robot in enumerate(self.robots):
-            frontiers = robot.get_frontiers()
-            if len(frontiers) > 0:
-                # Convert to numpy if not already
-                frontiers = np.array(frontiers, dtype=np.float32)
-                # Pad or truncate to max_frontiers
-                n_frontiers = min(len(frontiers), max_frontiers)
-                frontiers_array[i, :n_frontiers] = frontiers[:n_frontiers]
-                
-        return frontiers_array
-    
-    def get_robot_poses(self):
-        """Get normalized robot positions"""
-        return np.array([robot.get_normalized_position() for robot in self.robots])
-    
-    def get_robot_targets(self):
-        """Get current robot targets"""
-        targets = []
-        for robot in self.robots:
-            if robot.current_target_frontier is not None:
-                targets.append(robot.current_target_frontier)
-            else:
-                targets.append(np.zeros(2))
-        return np.array(targets)
-    
-    def save_model(self, filepath):
-        """Save model weights"""
-        print(f"\nSaving model to {filepath}")
-        self.network.save_weights(filepath)
-    
-    def load_model(self, filepath):
-        """Load model weights"""
-        print(f"\nLoading model from {filepath}")
-        self.network.load_weights(filepath)
+        
+        
+    def save_checkpoint(self, identifier):
+        """Save model checkpoint and training history"""
+        # Create checkpoint directory if it doesn't exist
+        checkpoint_dir = os.path.join(self.log_dir, 'checkpoints')
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Save model weights
+        model_path = os.path.join(checkpoint_dir, f'model_checkpoint_{identifier}.h5')
+        self.network.save(model_path)
+        print(f"\nSaved model to: {model_path}")
+
+        # Save training history
+        history_path = os.path.join(checkpoint_dir, f'training_history_{identifier}.npz')
+        np.savez(
+            history_path,
+            episode_rewards=self.training_history['episode_rewards'],
+            robot1_rewards=self.training_history['robot1_rewards'],
+            robot2_rewards=self.training_history['robot2_rewards'],
+            episode_lengths=self.training_history['episode_lengths'],
+            exploration_rates=self.training_history['exploration_rates'],
+            losses=self.training_history['losses'],
+            exploration_progress=self.training_history['exploration_progress']
+        )
+        print(f"Saved training history to: {history_path}")
+
+    def load_checkpoint(self, identifier):
+        """Load model checkpoint and training history"""
+        checkpoint_dir = os.path.join(self.log_dir, 'checkpoints')
+        
+        # Load model weights
+        model_path = os.path.join(checkpoint_dir, f'model_checkpoint_{identifier}.h5')
+        if os.path.exists(model_path):
+            self.network.load(model_path)
+            print(f"\nLoaded model from: {model_path}")
+        
+        # Load training history
+        history_path = os.path.join(checkpoint_dir, f'training_history_{identifier}.npz')
+        if os.path.exists(history_path):
+            data = np.load(history_path)
+            self.training_history = {
+                'episode_rewards': data['episode_rewards'].tolist(),
+                'robot1_rewards': data['robot1_rewards'].tolist(),
+                'robot2_rewards': data['robot2_rewards'].tolist(),
+                'episode_lengths': data['episode_lengths'].tolist(),
+                'exploration_rates': data['exploration_rates'].tolist(),
+                'losses': data['losses'].tolist(),
+                'exploration_progress': data['exploration_progress'].tolist()
+            }
+            print(f"Loaded training history from: {history_path}")
