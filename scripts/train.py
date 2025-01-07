@@ -123,10 +123,10 @@ def main():
         if not loaded:
             print("Starting training from scratch")
         
-        # Start training
+        # Start training (updated parameter name)
         print("\nStarting training loop...")
         print("Press Ctrl+C to stop training\n")
-        trainer.train(num_updates=10000)  # Only pass num_updates parameter
+        trainer.train(num_episodes=1000)  # Changed from num_updates to num_episodes
         
         # Save final model
         final_path = os.path.join(models_dir, 'final_model.h5')
