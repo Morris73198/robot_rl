@@ -157,11 +157,11 @@ class RobotVisualizer:
 
 class MultiRobotTrainer:
     def __init__(self, network, robots, log_dir,
-                 num_steps=128, num_envs=1,
-                 learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
-                 clip_ratio=0.2, value_loss_coef=0.5, entropy_coef=0.01,
-                 max_grad_norm=0.5, num_epochs=10, 
-                 memory_size=10000, batch_size=32):
+                num_steps=128, num_envs=1,
+                learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
+                clip_ratio=0.2, value_loss_coef=0.5, entropy_coef=0.01,
+                max_grad_norm=0.5, num_epochs=10, 
+                memory_size=10000, batch_size=32):
         
         self.network = network
         self.robots = robots
@@ -169,6 +169,7 @@ class MultiRobotTrainer:
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.max_frontiers = 50
+        self.log_dir = log_dir  # Store the log_dir
         
         # Training parameters
         self.learning_rate = learning_rate
@@ -232,11 +233,13 @@ class MultiRobotTrainer:
     def choose_actions(self, state, frontiers, robot_poses, robot_targets):
         """Choose actions for both robots"""
         if len(frontiers) == 0:
-            return 0, 0
+            return (0, 0)  # Return default actions instead of None
 
         if np.random.random() < self.epsilon:
             valid_frontiers = list(range(min(self.max_frontiers, len(frontiers))))
-            return np.random.choice(valid_frontiers), np.random.choice(valid_frontiers)
+            if not valid_frontiers:  # If no valid frontiers
+                return (0, 0)
+            return (np.random.choice(valid_frontiers), np.random.choice(valid_frontiers))
 
         # Use network for prediction
         state_tensor = tf.convert_to_tensor(state[None], dtype=tf.float32)
@@ -249,6 +252,15 @@ class MultiRobotTrainer:
             [state_tensor, frontiers_tensor, robot_poses_tensor, robot_targets_tensor],
             training=False
         )
+
+        valid_frontiers = min(self.max_frontiers, len(frontiers))
+        robot1_logits = policy_logits[0][0, :valid_frontiers]
+        robot2_logits = policy_logits[1][0, :valid_frontiers]
+
+        robot1_action = tf.argmax(robot1_logits).numpy()
+        robot2_action = tf.argmax(robot2_logits).numpy()
+
+        return (robot1_action, robot2_action)
 
     def print_progress(self, episode, num_episodes, total_reward,
                       robot1_reward, robot2_reward, steps, episode_losses):
@@ -265,61 +277,87 @@ class MultiRobotTrainer:
         print("-" * 50)
 
     def plot_training_progress(self):
-        """Plot training metrics"""
+        """绘制训练进度图"""
         fig, axs = plt.subplots(6, 1, figsize=(12, 20))
+        
         episodes = range(1, len(self.training_history['episode_rewards']) + 1)
         
-        # Total rewards
-        axs[0].plot(episodes, self.training_history['episode_rewards'],
-                   color='#4B0082')
+        # 绘制总奖励
+        axs[0].plot(episodes, self.training_history['episode_rewards'], color='#4B0082')
         axs[0].set_title('Total Rewards')
         axs[0].set_xlabel('Episodes')
         axs[0].set_ylabel('Reward')
         axs[0].grid(True)
         
-        # Individual robot rewards
-        axs[1].plot(episodes, self.training_history['robot1_rewards'],
-                   color='#800080', label='Robot1', alpha=0.8)
-        axs[1].plot(episodes, self.training_history['robot2_rewards'],
-                   color='#FFA500', label='Robot2', alpha=0.8)
+        # 绘制各机器人奖励
+        axs[1].plot(episodes, self.training_history['robot1_rewards'], 
+                    color='#800080', label='Robot1', alpha=0.8)
+        axs[1].plot(episodes, self.training_history['robot2_rewards'], 
+                    color='#FFA500', label='Robot2', alpha=0.8)
         axs[1].set_title('Robot Rewards')
         axs[1].set_xlabel('Episodes')
         axs[1].set_ylabel('Reward')
         axs[1].legend()
         axs[1].grid(True)
         
-        # Episode lengths
-        axs[2].plot(episodes, self.training_history['episode_lengths'],
-                   color='#4169E1')
+        # 绘制步数
+        axs[2].plot(episodes, self.training_history['episode_lengths'], color='#4169E1')
         axs[2].set_title('Episode Lengths')
         axs[2].set_xlabel('Episodes')
         axs[2].set_ylabel('Steps')
         axs[2].grid(True)
         
-        # Exploration rate
-        axs[3].plot(episodes, self.training_history['exploration_rates'],
-                   color='#228B22')
+        # 绘制探索率
+        axs[3].plot(episodes, self.training_history['exploration_rates'], color='#228B22')
         axs[3].set_title('Exploration Rate')
         axs[3].set_xlabel('Episodes')
         axs[3].set_ylabel('Epsilon')
         axs[3].grid(True)
         
-        # Training loss
-        ax
+        # 绘制损失
+        axs[4].plot(episodes, self.training_history['losses'], color='#B22222')
+        axs[4].set_title('Training Loss')
+        axs[4].set_xlabel('Episodes')
+        axs[4].set_ylabel('Loss')
+        axs[4].grid(True)
+        
+        # 绘制探索进度
+        axs[5].plot(episodes, self.training_history['exploration_progress'], color='#2F4F4F')
+        axs[5].set_title('Exploration Progress')
+        axs[5].set_xlabel('Episodes')
+        axs[5].set_ylabel('Progress')
+        axs[5].grid(True)
+        
+        plt.tight_layout()
+        
+        # 保存图表
+        plt.savefig(os.path.join(self.log_dir, 'training_progress.png'), 
+                    dpi=300, bbox_inches='tight')
+        plt.close()
 
-        valid_frontiers = min(self.max_frontiers, len(frontiers))
-        robot1_logits = policy_logits[0][0, :valid_frontiers]
-        robot2_logits = policy_logits[1][0, :valid_frontiers]
-
-        robot1_action = tf.argmax(robot1_logits).numpy()
-        robot2_action = tf.argmax(robot2_logits).numpy()
-
-        return robot1_action, robot2_action
+        # 额外绘制一个单独的机器人奖励对比图
+        plt.figure(figsize=(10, 6))
+        plt.plot(episodes, self.training_history['robot1_rewards'],
+                color='#800080', label='Robot1', alpha=0.7)
+        plt.plot(episodes, self.training_history['robot2_rewards'],
+                color='#FFA500', label='Robot2', alpha=0.7)
+        plt.fill_between(episodes, self.training_history['robot1_rewards'],
+                        alpha=0.3, color='#800080')
+        plt.fill_between(episodes, self.training_history['robot2_rewards'],
+                        alpha=0.3, color='#FFA500')
+        plt.title('Robot Rewards Comparison')
+        plt.xlabel('Episodes')
+        plt.ylabel('Reward')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(self.log_dir, 'robots_rewards_comparison.png'),
+                    dpi=300, bbox_inches='tight')
+        plt.close()
 
     @tf.function
     def _train_step(self, states, frontiers, robot_poses, robot_targets,
-                   actions, old_probs, advantages, returns):
-        """Execute single training step"""
+                actions, old_probs, advantages, returns):
+        """Execute single training step with type consistency"""
         with tf.GradientTape() as tape:
             # Forward pass
             policy_logits, values = self.network(
@@ -332,6 +370,11 @@ class MultiRobotTrainer:
             value_loss = 0
             entropy_loss = 0
 
+            # Convert old_probs to float32 to match network output
+            old_probs = tf.cast(old_probs, tf.float32)
+            advantages = tf.cast(advantages, tf.float32)
+            returns = tf.cast(returns, tf.float32)
+
             # Calculate losses for each robot
             for i in range(self.num_robots):
                 # Get policy logits and probabilities
@@ -339,7 +382,7 @@ class MultiRobotTrainer:
                 probs = tf.nn.softmax(logits)
                 
                 # Calculate action probabilities
-                action_masks = tf.one_hot(actions[:, i], tf.shape(logits)[1])
+                action_masks = tf.one_hot(actions[:, i], tf.shape(logits)[1], dtype=tf.float32)
                 action_probs = tf.reduce_sum(probs * action_masks, axis=1)
                 
                 # Calculate ratio and surrogate objectives
@@ -355,7 +398,7 @@ class MultiRobotTrainer:
                 policy_loss += -tf.reduce_mean(tf.minimum(surrogate1, surrogate2))
                 
                 # Value loss
-                value_pred = values[i]
+                value_pred = tf.cast(values[i], tf.float32)
                 value_loss += 0.5 * tf.reduce_mean(
                     tf.square(returns[:, i] - value_pred))
                 
@@ -365,8 +408,8 @@ class MultiRobotTrainer:
 
             # Combine losses
             total_loss = (policy_loss + 
-                         self.value_loss_coef * value_loss -
-                         self.entropy_coef * entropy_loss)
+                        self.value_loss_coef * value_loss -
+                        self.entropy_coef * entropy_loss)
 
         # Compute and apply gradients
         grads = tape.gradient(total_loss, self.network.trainable_variables)
@@ -628,7 +671,7 @@ class MultiRobotTrainer:
                                   steps, episode_losses)
                 
                 # Save periodic checkpoints and visualizations
-                if (episode + 1) % 10 == 0:
+                if (episode + 1) % 1 == 0:
                     self.save_checkpoint(episode + 1)
                     self.plot_training_progress()
                     self.visualizer.save(f'exploration_ep{episode+1}.png')
@@ -723,3 +766,51 @@ class MultiRobotTrainer:
                 'exploration_progress': data['exploration_progress'].tolist()
             }
             print(f"Loaded training history from: {history_path}")
+    
+    
+    def save_model(self, path):
+        """Save model to specified path"""
+        try:
+            # Save network weights
+            self.network.save(path)
+            print(f"\nSaved model to: {path}")
+            
+            # Save training history
+            history_path = path.replace('.h5', '_history.npz')
+            np.savez(
+                history_path,
+                episode_rewards=self.training_history['episode_rewards'],
+                robot1_rewards=self.training_history['robot1_rewards'],
+                robot2_rewards=self.training_history['robot2_rewards'],
+                episode_lengths=self.training_history['episode_lengths'],
+                exploration_rates=self.training_history['exploration_rates'],
+                losses=self.training_history['losses'],
+                exploration_progress=self.training_history['exploration_progress']
+            )
+            print(f"Saved training history to: {history_path}")
+        except Exception as e:
+            print(f"Error saving model: {str(e)}")
+
+    def load_model(self, path):
+        """Load model from specified path"""
+        try:
+            # Load network weights
+            self.network.load(path)
+            print(f"\nLoaded model from: {path}")
+            
+            # Try to load training history
+            history_path = path.replace('.h5', '_history.npz')
+            if os.path.exists(history_path):
+                data = np.load(history_path)
+                self.training_history = {
+                    'episode_rewards': data['episode_rewards'].tolist(),
+                    'robot1_rewards': data['robot1_rewards'].tolist(),
+                    'robot2_rewards': data['robot2_rewards'].tolist(),
+                    'episode_lengths': data['episode_lengths'].tolist(),
+                    'exploration_rates': data['exploration_rates'].tolist(),
+                    'losses': data['losses'].tolist(),
+                    'exploration_progress': data['exploration_progress'].tolist()
+                }
+                print(f"Loaded training history from: {history_path}")
+        except Exception as e:
+            print(f"Error loading model: {str(e)}")
