@@ -4,6 +4,8 @@ from collections import deque
 import time
 import os
 import matplotlib.pyplot as plt
+# import matplotlib
+# matplotlib.use('Agg')
 import random
 
 
@@ -671,7 +673,7 @@ class MultiRobotTrainer:
                                   steps, episode_losses)
                 
                 # Save periodic checkpoints and visualizations
-                if (episode + 1) % 1 == 0:
+                if (episode + 1) % 20 == 0:
                     self.save_checkpoint(episode + 1)
                     self.plot_training_progress()
                     self.visualizer.save(f'exploration_ep{episode+1}.png')
