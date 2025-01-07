@@ -3,6 +3,9 @@ import numpy as np
 from collections import deque
 import time
 import os
+import matplotlib
+matplotlib.use('TkAgg')  # 使用 TkAgg 後端
+import matplotlib.pyplot as plt
 
 class PPOBuffer:
     """PPO 的經驗緩衝區"""
@@ -62,7 +65,7 @@ class PPOBuffer:
         
 class MultiRobotTrainer:
     def __init__(self, network, robots, log_dir,
-                 num_steps=128, num_envs=8,
+                 num_steps=128, num_envs=1,
                  learning_rate=3e-4, gamma=0.99, gae_lambda=0.95,
                  clip_ratio=0.2, value_loss_coef=0.5, entropy_coef=0.01,
                  max_grad_norm=0.5, num_epochs=10):
@@ -73,7 +76,7 @@ class MultiRobotTrainer:
         self.num_steps = num_steps
         self.num_envs = num_envs
         
-        # Training parameters
+        # 訓練參數
         self.learning_rate = learning_rate
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -83,23 +86,26 @@ class MultiRobotTrainer:
         self.max_grad_norm = max_grad_norm
         self.num_epochs = num_epochs
         
-        # Initialize optimizer
+        # 初始化優化器
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         
-        # Initialize experience buffer
+        # 初始化經驗緩衝區
         obs_shape = robots[0].get_observation().shape
         self.buffer = PPOBuffer(
             num_steps=num_steps,
             num_robots=self.num_robots,
             num_envs=num_envs,
             obs_shape=obs_shape,
-            max_frontiers=50  # Adjust based on your needs
+            max_frontiers=50
         )
         
-        # Logging
+        # 記錄
         self.summary_writer = tf.summary.create_file_writer(log_dir)
         self.episode_rewards = deque(maxlen=10)
         self.total_steps = 0
+        
+        # 設置圖形顯示
+        plt.ion()  # 開啟互動模式
         
     def compute_advantages(self, buffer_data, final_values):
         """Compute GAE advantages
@@ -234,13 +240,10 @@ class MultiRobotTrainer:
 
 
     def train(self, num_updates=1000):
-        """Main training loop for multi-robot exploration
+        """Main training loop with visualization and progress tracking
         
         Args:
             num_updates: Number of training updates to perform
-            
-        Returns:
-            None
         """
         try:
             # Initialize environment
@@ -250,6 +253,17 @@ class MultiRobotTrainer:
             print("Starting training...")
             start_time = time.time()
             
+            # Set visualization and printing intervals
+            VIZ_INTERVAL = 5  # Update visualization every 5 steps
+            PRINT_INTERVAL = 10  # Print progress every 10 updates
+            
+            # Ensure visualization is properly set up for all robots
+            for robot in self.robots:
+                robot.plot = True
+                if not hasattr(robot, 'fig'):
+                    robot.initialize_visualization()
+                    
+            # Training loop
             for update in range(num_updates):
                 # Collect experience
                 for step in range(self.num_steps):
@@ -310,7 +324,7 @@ class MultiRobotTrainer:
                     self.robots[1].op_map = self.robots[0].op_map.copy()
                     
                     # Process values with proper shape handling
-                    value_array = np.array([v.numpy() for v in values])  # [num_robots, 1]
+                    value_array = np.array([v[0].numpy() for v in values])  # [num_robots, 1]
                     value_array = np.squeeze(value_array)  # Remove extra dimensions
                     
                     # Store experience
@@ -324,12 +338,12 @@ class MultiRobotTrainer:
                     state = next_states[0]  # Use first robot's state
                     self.total_steps += 1
                     
-                    # Visualization update (every 10 steps)
-                    if self.total_steps % 10 == 0:
-                        if self.robots[0].plot:
-                            self.robots[0].plot_env()
-                        if self.robots[1].plot:
-                            self.robots[1].plot_env()
+                    # Visualization update
+                    if self.total_steps % VIZ_INTERVAL == 0:
+                        for robot in self.robots:
+                            if hasattr(robot, 'plot_env'):
+                                robot.plot_env()
+                        plt.pause(0.001)  # Brief pause to update display
                 
                 # Get final values for advantage calculation
                 final_state_tensor = tf.convert_to_tensor(state[None], dtype=tf.float32)
@@ -343,7 +357,7 @@ class MultiRobotTrainer:
                 )
                 
                 # Process final values with proper shape handling
-                final_value_array = np.array([v.numpy() for v in final_values])
+                final_value_array = np.array([v[0].numpy() for v in final_values])
                 final_value_array = np.squeeze(final_value_array)
                 
                 # Get stored experience
@@ -353,12 +367,6 @@ class MultiRobotTrainer:
                 advantages, returns = self.compute_advantages(
                     buffer_data, final_value_array
                 )
-                
-                # Perform PPO updates
-                total_loss = 0
-                policy_loss = 0
-                value_loss = 0
-                entropy_loss = 0
                 
                 # Convert data to tensors for training
                 states_tensor = tf.convert_to_tensor(buffer_data[0], dtype=tf.float32)
@@ -370,24 +378,28 @@ class MultiRobotTrainer:
                 advantages_tensor = tf.convert_to_tensor(advantages, dtype=tf.float32)
                 returns_tensor = tf.convert_to_tensor(returns, dtype=tf.float32)
                 
-                # Multiple epochs of updating
+                # Perform multiple epochs of updating
+                total_loss = 0
+                policy_loss = 0
+                value_loss = 0
+                entropy_loss = 0
+                
                 for epoch in range(self.num_epochs):
-                    total_loss_epoch, policy_loss_epoch, value_loss_epoch, entropy_loss_epoch = \
-                        self.train_step(
-                            states_tensor,
-                            frontiers_tensor,
-                            robot_poses_tensor,
-                            robot_targets_tensor,
-                            actions_tensor,
-                            old_probs_tensor,
-                            advantages_tensor,
-                            returns_tensor
-                        )
+                    epoch_losses = self.train_step(
+                        states_tensor,
+                        frontiers_tensor,
+                        robot_poses_tensor,
+                        robot_targets_tensor,
+                        actions_tensor,
+                        old_probs_tensor,
+                        advantages_tensor,
+                        returns_tensor
+                    )
                     
-                    total_loss += total_loss_epoch
-                    policy_loss += policy_loss_epoch
-                    value_loss += value_loss_epoch
-                    entropy_loss += entropy_loss_epoch
+                    total_loss += epoch_losses[0]
+                    policy_loss += epoch_losses[1]
+                    value_loss += epoch_losses[2]
+                    entropy_loss += epoch_losses[3]
                 
                 # Average losses over epochs
                 total_loss /= self.num_epochs
@@ -395,17 +407,20 @@ class MultiRobotTrainer:
                 value_loss /= self.num_epochs
                 entropy_loss /= self.num_epochs
                 
-                # Logging
-                if update % 10 == 0:
+                # Print training progress
+                if update % PRINT_INTERVAL == 0:
                     exploration_progress = self.robots[0].get_exploration_progress()
+                    elapsed_time = time.time() - start_time
                     
-                    print(f"\nUpdate {update}")
+                    print(f"\nUpdate {update}/{num_updates}")
                     print(f"Total Loss: {total_loss:.4f}")
                     print(f"Policy Loss: {policy_loss:.4f}")
                     print(f"Value Loss: {value_loss:.4f}")
                     print(f"Entropy Loss: {entropy_loss:.4f}")
                     print(f"Exploration Progress: {exploration_progress:.2%}")
+                    print(f"Time Elapsed: {elapsed_time:.1f}s")
                     
+                    # Log to TensorBoard
                     with self.summary_writer.as_default():
                         tf.summary.scalar('loss/total', total_loss, step=update)
                         tf.summary.scalar('loss/policy', policy_loss, step=update)
@@ -431,8 +446,21 @@ class MultiRobotTrainer:
             raise e
             
         finally:
+            # Final cleanup
+            plt.ioff()  # Turn off interactive mode
+            for robot in self.robots:
+                if hasattr(robot, 'cleanup_visualization'):
+                    robot.cleanup_visualization()
+                    
             # Final save
             self.save_model('model_final.h5')
+            
+    def __del__(self):
+        """清理資源"""
+        plt.ioff()
+        for robot in self.robots:
+            if hasattr(robot, 'cleanup_visualization'):
+                robot.cleanup_visualization()
     
     def get_frontiers(self):
         """Get current frontiers from all robots with padding"""
