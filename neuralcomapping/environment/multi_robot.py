@@ -682,10 +682,10 @@ class Robot:
         # 4. 繪製目標 frontier 和規劃路徑
         if self.current_target_frontier is not None:
             # 目標點 - 使用三角形標記
-            triangle_color = '#800080' if self.is_primary else '#FFA500'  # 對應機器人顏色
-            plt.plot(self.current_target_frontier[0], self.current_target_frontier[1], 
-                    marker='^', color=triangle_color, markersize=15, 
-                    label=f'{"Robot1" if self.is_primary else "Robot2"} Target')
+            # triangle_color = '#800080' if self.is_primary else '#FFA500'  # 對應機器人顏色
+            # plt.plot(self.current_target_frontier[0], self.current_target_frontier[1], 
+            #         marker='^', color=triangle_color, markersize=15, 
+            #         label=f'{"Robot1" if self.is_primary else "Robot2"} Target')
             
             # 如果有當前路徑，顯示規劃路徑
             if self.current_path is not None and self.current_path.shape[1] > self.current_path_index:
@@ -697,6 +697,10 @@ class Robot:
                 if remaining_path.shape[1] > 1:
                     plt.plot(remaining_path[0, 1], remaining_path[1, 1], 'x', 
                             color=path_color, markersize=8, label='Next Point')
+                    
+                # Add triangle marker at the end of the path
+                plt.plot(remaining_path[0, -1], remaining_path[1, -1], '^',
+                         color=path_color, markersize=10, label='Goal')
         
         # 5. 繪製當前位置
         plt.plot(self.robot_position[0], self.robot_position[1], 
