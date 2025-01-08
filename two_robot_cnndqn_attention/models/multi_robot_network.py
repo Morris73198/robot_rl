@@ -225,6 +225,34 @@ class MultiRobotNetworkModel:
         self.target_model = self._build_model()
         self.target_model.set_weights(self.model.get_weights())
         
+    def pad_frontiers(self, frontiers):
+        """Pad frontier points to fixed length and normalize coordinates
+        
+        Args:
+            frontiers: Array of frontier points with shape (N, 2)
+            
+        Returns:
+            padded: Padded and normalized frontier points with shape (max_frontiers, 2)
+        """
+        padded = np.zeros((self.max_frontiers, 2))
+        
+        if len(frontiers) > 0:
+            frontiers = np.array(frontiers)
+            
+            # Get map dimensions from the first frontier point (assumes all points use same dimensions)
+            map_width = self.input_shape[1]  # Use input shape width
+            map_height = self.input_shape[0]  # Use input shape height
+            
+            # Normalize coordinates
+            normalized_frontiers = frontiers.copy()
+            normalized_frontiers[:, 0] = frontiers[:, 0] / float(map_width)
+            normalized_frontiers[:, 1] = frontiers[:, 1] / float(map_height)
+            
+            n_frontiers = min(len(frontiers), self.max_frontiers)
+            padded[:n_frontiers] = normalized_frontiers[:n_frontiers]
+        
+        return padded
+        
     def _build_perception_module(self, inputs):
         """構建感知模塊"""
         # 多尺度特徵提取
