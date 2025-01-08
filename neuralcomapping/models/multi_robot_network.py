@@ -160,8 +160,8 @@ class MultiRobotNetwork(tf.keras.Model):
             layers.Dense(feature_dim // 2)
         ])
         
-        # Feature processing layers
-        self.frontier_projection = tf.keras.Sequential([
+        # Frontier feature processing
+        self.frontier_encoder = tf.keras.Sequential([
             layers.Dense(32, activation='relu'),
             layers.Dense(64, activation='relu'),
             layers.Dense(feature_dim)
@@ -189,52 +189,7 @@ class MultiRobotNetwork(tf.keras.Model):
                 layers.Dense(1)
             ])
             self.value_heads.append(head)
-            
-    def build(self, input_shape):
-        # Call parent build
-        super().build(input_shape)
-        
-        # Build state processor
-        dummy_state = tf.zeros((1,) + input_shape[0][1:])
-        _ = self.cnn(dummy_state)
-        
-        # Build feature processors
-        dummy_robot = tf.zeros((1, 2))
-        dummy_frontier = tf.zeros((1, 2))
-        
-        _ = self.robot_init(dummy_robot)
-        _ = self.frontier_projection(dummy_frontier)
-        _ = self.occupancy_proj(tf.zeros((1, 128)))
-        
-        # Build attention layers
-        dummy_features = tf.zeros((1, 1, self.feature_dim))
-        _ = self.robot_query(dummy_features)
-        _ = self.frontier_query(dummy_features)
-        _ = self.robot_key(dummy_features)
-        _ = self.frontier_key(dummy_features)
-        _ = self.robot_value(dummy_features)
-        _ = self.frontier_value(dummy_features)
-        
-        # Build output projection
-        _ = self.output_proj(dummy_features)
-        
-        # Build value heads
-        dummy_value_input = tf.zeros((1, self.feature_dim * 2))
-        for head in self.value_heads:
-            _ = head(dummy_value_input)
 
-    @tf.function
-    def process_features(self, poses, processor):
-        """Generic feature processor that avoids tensor capturing issues"""
-        # Process each position individually using map_fn
-        return tf.map_fn(
-            lambda x: processor(x[None])[0],  # Add and remove batch dim for each item
-            poses,
-            dtype=tf.float32,
-            parallel_iterations=10
-        )
-
-    @tf.function
     def compute_attention(self, query, key, value, scale=True):
         """Compute scaled dot-product attention"""
         # Compute attention scores
@@ -252,64 +207,83 @@ class MultiRobotNetwork(tf.keras.Model):
         
         return output, attention_weights
 
-    @tf.function
+    def encode_frontiers(self, frontiers_batch):
+        """Encode frontiers with proper reshaping"""
+        batch_size = tf.shape(frontiers_batch)[0]
+        num_frontiers = tf.shape(frontiers_batch)[2]
+        
+        # Reshape to process all frontiers at once
+        frontiers_reshaped = tf.reshape(frontiers_batch, [-1, 2])  # Combine batch and frontier dims
+        
+        # Encode each frontier
+        encoded_frontiers = self.frontier_encoder(frontiers_reshaped)
+        
+        # Reshape back to batch format
+        return tf.reshape(encoded_frontiers, [batch_size, -1, num_frontiers, self.feature_dim])
+
     def call(self, inputs, training=False):
         states, frontiers, robot_poses, robot_targets = inputs
         batch_size = tf.shape(states)[0]
         
         # Process state through CNN
-        state_features = self.cnn(states)  # [batch_size, cnn_features]
+        state_features = self.cnn(states)
         
         # Process robot features
         robot_features = tf.map_fn(
             lambda x: self.robot_init(x),
             robot_poses,
-            dtype=tf.float32
-        )  # [batch_size, num_robots, feature_dim//2]
+            fn_output_signature=tf.float32
+        )
         
-        # Add occupancy information
-        occupancy_features = self.occupancy_proj(state_features)  # [batch_size, feature_dim//2]
-        occupancy_features = tf.expand_dims(occupancy_features, 1)  # [batch_size, 1, feature_dim//2]
+        # Add occupancy information to robot features
+        occupancy_features = self.occupancy_proj(state_features)
+        occupancy_features = tf.expand_dims(occupancy_features, 1)
         occupancy_features = tf.tile(
             occupancy_features, [1, self.num_robots, 1]
-        )  # [batch_size, num_robots, feature_dim//2]
+        )
         
         # Combine robot and occupancy features
-        robot_features = tf.concat(
-            [robot_features, occupancy_features], axis=-1
-        )  # [batch_size, num_robots, feature_dim]
+        robot_features = tf.concat([robot_features, occupancy_features], axis=-1)
         
-        # Process frontier features
-        frontier_features = tf.map_fn(
-            lambda x: self.frontier_projection(x),
-            frontiers,
-            dtype=tf.float32
-        )  # [batch_size, num_frontiers, feature_dim]
+        # Process frontiers
+        frontier_features = self.encode_frontiers(frontiers)
         
-        # Apply graph neural network layers
+        # Initialize GNN output
         final_affinity = None
         
+        # Apply GNN layers
         for _ in range(self.num_gnn_layers):
-            # Self-attention for robots
+            # Robot self-attention
             robot_q = self.robot_query(robot_features)
             robot_k = self.robot_key(robot_features)
             robot_v = self.robot_value(robot_features)
             robot_output, _ = self.compute_attention(robot_q, robot_k, robot_v)
             robot_features = robot_features + robot_output
             
-            # Self-attention for frontiers
-            frontier_q = self.frontier_query(frontier_features)
-            frontier_k = self.frontier_key(frontier_features)
-            frontier_v = self.frontier_value(frontier_features)
-            frontier_output, _ = self.compute_attention(frontier_q, frontier_k, frontier_v)
-            frontier_features = frontier_features + frontier_output
+            # Frontier self-attention (for each robot's frontiers)
+            frontier_features_list = tf.unstack(frontier_features, axis=1)
+            updated_frontier_features = []
             
-            # Cross attention for assignment
-            layer_affinity = tf.matmul(
-                self.output_proj(robot_features),
-                self.output_proj(frontier_features),
-                transpose_b=True
-            )
+            for robot_frontiers in frontier_features_list:
+                frontier_q = self.frontier_query(robot_frontiers)
+                frontier_k = self.frontier_key(robot_frontiers)
+                frontier_v = self.frontier_value(robot_frontiers)
+                frontier_output, _ = self.compute_attention(frontier_q, frontier_k, frontier_v)
+                updated_frontier_features.append(robot_frontiers + frontier_output)
+            
+            frontier_features = tf.stack(updated_frontier_features, axis=1)
+            
+            # Cross attention between robots and their frontiers
+            layer_affinity = []
+            for i in range(self.num_robots):
+                robot_feat = tf.expand_dims(robot_features[:, i], 1)
+                robot_proj = self.output_proj(robot_feat)
+                frontier_proj = self.output_proj(frontier_features[:, i])
+                
+                affinity = tf.matmul(robot_proj, frontier_proj, transpose_b=True)
+                layer_affinity.append(affinity[:, 0])  # Remove extra dimension
+            
+            layer_affinity = tf.stack(layer_affinity, axis=1)
             
             if final_affinity is None:
                 final_affinity = layer_affinity
@@ -331,7 +305,7 @@ class MultiRobotNetwork(tf.keras.Model):
             values.append(head(value_features))
         
         return tf.unstack(assignment_probs, axis=1), values
-
+        
     def save(self, filepath):
         self.save_weights(filepath)
         
