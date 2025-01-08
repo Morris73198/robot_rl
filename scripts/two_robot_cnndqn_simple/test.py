@@ -14,7 +14,7 @@ def ensure_dir(directory):
 def test_model(model_path, num_episodes=5, plot=True):
     try:
         # 創建圖片保存目錄
-        base_output_dir = 'exploration_steps'
+        base_output_dir = 'result_simple'
         ensure_dir(base_output_dir)
         
         # 載入模型

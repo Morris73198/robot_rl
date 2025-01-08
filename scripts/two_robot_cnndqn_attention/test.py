@@ -1,22 +1,44 @@
 import os
 import sys
 import numpy as np
+import matplotlib
+# Set the backend to Agg before importing pyplot
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from two_robot_cnndqn_attention.models.multi_robot_network import MultiRobotNetworkModel
 from two_robot_cnndqn_attention.environment.multi_robot import Robot
 from two_robot_cnndqn_attention.config import MODEL_CONFIG, MODEL_DIR
 
-def test_model(model_path, num_episodes=5, plot=True):
-    # Initialize robots to None for proper cleanup
+def save_plot(robot, step, output_path):
+    """Save a single robot's plot
+    
+    Args:
+        robot: Robot instance
+        step: Current step number
+        output_path: Path to save the plot
+    """
+    # Create a new figure for each plot
+    plt.figure(figsize=(10, 10))
+    robot.plot_env()
+    plt.savefig(output_path, bbox_inches='tight')
+    plt.close('all')  # Close all figures to free memory
+
+def test_model(model_path, num_episodes=5):
+    """Test the model and save exploration visualizations
+    
+    Args:
+        model_path: Path to the trained model
+        num_episodes: Number of episodes to run
+    """
     robot1, robot2 = None, None
     
     try:
-        # Create output directory
-        base_output_dir = 'exploration_steps'
+        # Create base output directory
+        base_output_dir = 'result_attention'
         if not os.path.exists(base_output_dir):
             os.makedirs(base_output_dir)
-        
-        # Initialize and load model
+            
+        # Load model
         print("Loading model from:", model_path)
         model = MultiRobotNetworkModel(
             input_shape=MODEL_CONFIG['input_shape'],
@@ -24,41 +46,37 @@ def test_model(model_path, num_episodes=5, plot=True):
         )
         model.load(model_path)
         
-        # Create shared environment for testing
+        # Create shared environment
         print("Initializing test environment...")
         robot1, robot2 = Robot.create_shared_robots(
             index_map=0,
             train=False,
-            plot=plot
+            plot=True
         )
         
-        # Track testing statistics
+        # Track statistics
         episode_stats = {
             'exploration_progress': [],
             'steps': [],
             'robot1_path_length': [],
-            'robot2_path_length': [],
-            'completion_time': []
+            'robot2_path_length': []
         }
         
         for episode in range(num_episodes):
             print(f"\nStarting episode {episode + 1}/{num_episodes}")
             
             # Create episode directory
-            episode_dir = os.path.join(base_output_dir, f'episode_{episode+1:03d}')
+            episode_dir = os.path.join(base_output_dir, f'episode_{episode+1:02d}')
             if not os.path.exists(episode_dir):
                 os.makedirs(episode_dir)
             
-            # Reset environment
+            # Reset environment and initialize episode
             state = robot1.begin()
             robot2.begin()
             
             # Save initial state
-            if plot:
-                robot1.plot_env()
-                plt.savefig(os.path.join(episode_dir, f'robot1_step_000.png'))
-                robot2.plot_env()
-                plt.savefig(os.path.join(episode_dir, f'robot2_step_000.png'))
+            save_plot(robot1, 0, os.path.join(episode_dir, f'robot1_step_0000.png'))
+            save_plot(robot2, 0, os.path.join(episode_dir, f'robot2_step_0000.png'))
             
             steps = 0
             robot1_path_length = 0
@@ -69,47 +87,38 @@ def test_model(model_path, num_episodes=5, plot=True):
                 if len(frontiers) == 0:
                     break
                     
-                # Get current positions and targets
+                # Get current positions and normalize
                 robot1_pos = robot1.get_normalized_position()
                 robot2_pos = robot2.get_normalized_position()
+                old_robot1_pos = robot1.robot_position.copy()
+                old_robot2_pos = robot2.robot_position.copy()
                 
-                # Normalize robot targets using map dimensions
-                map_width = float(robot1.map_size[1])
-                map_height = float(robot1.map_size[0])
+                # Normalize targets
+                map_dims = np.array([float(robot1.map_size[1]), float(robot1.map_size[0])])
+                robot1_target = (np.zeros(2) if robot1.current_target_frontier is None 
+                               else robot1.current_target_frontier / map_dims)
+                robot2_target = (np.zeros(2) if robot2.current_target_frontier is None 
+                               else robot2.current_target_frontier / map_dims)
                 
-                robot1_target = np.zeros(2) if robot1.current_target_frontier is None else \
-                              robot1.current_target_frontier / np.array([map_width, map_height])
-                robot2_target = np.zeros(2) if robot2.current_target_frontier is None else \
-                              robot2.current_target_frontier / np.array([map_width, map_height])
-                
-                # Prepare model inputs
-                state_batch = np.expand_dims(state, 0)
-                frontiers_batch = np.expand_dims(model.pad_frontiers(frontiers), 0)
-                robot1_pos_batch = np.expand_dims(robot1_pos, 0)
-                robot2_pos_batch = np.expand_dims(robot2_pos, 0)
-                robot1_target_batch = np.expand_dims(robot1_target, 0)
-                robot2_target_batch = np.expand_dims(robot2_target, 0)
-                
-                # Get model predictions
+                # Prepare model inputs and get predictions
                 predictions = model.predict(
-                    state_batch, frontiers_batch,
-                    robot1_pos_batch, robot2_pos_batch,
-                    robot1_target_batch, robot2_target_batch
+                    np.expand_dims(state, 0),
+                    np.expand_dims(model.pad_frontiers(frontiers), 0),
+                    np.expand_dims(robot1_pos, 0),
+                    np.expand_dims(robot2_pos, 0),
+                    np.expand_dims(robot1_target, 0),
+                    np.expand_dims(robot2_target, 0)
                 )
                 
-                # Select actions
+                # Select and execute actions
                 valid_frontiers = min(MODEL_CONFIG['max_frontiers'], len(frontiers))
                 robot1_action = np.argmax(predictions['robot1'][0, :valid_frontiers])
                 robot2_action = np.argmax(predictions['robot2'][0, :valid_frontiers])
                 
-                # Execute actions
                 robot1_target = frontiers[robot1_action]
                 robot2_target = frontiers[robot2_action]
                 
                 # Move robots
-                old_robot1_pos = robot1.robot_position.copy()
-                old_robot2_pos = robot2.robot_position.copy()
-                
                 next_state1, r1, d1 = robot1.move_to_frontier(robot1_target)
                 robot2.op_map = robot1.op_map.copy()
                 
@@ -127,22 +136,20 @@ def test_model(model_path, num_episodes=5, plot=True):
                 state = next_state1
                 steps += 1
                 
-                # Save visualization
-                if plot and steps % 10 == 0:
-                    robot1.plot_env()
-                    plt.savefig(os.path.join(episode_dir, f'robot1_step_{steps:03d}.png'))
-                    robot2.plot_env()
-                    plt.savefig(os.path.join(episode_dir, f'robot2_step_{steps:03d}.png'))
-                    plt.pause(0.001)
+                # Save plots every 10 steps
+                if steps % 10 == 0:
+                    save_plot(robot1, steps, 
+                            os.path.join(episode_dir, f'robot1_step_{steps:04d}.png'))
+                    save_plot(robot2, steps, 
+                            os.path.join(episode_dir, f'robot2_step_{steps:04d}.png'))
             
             # Save final state
-            if plot:
-                robot1.plot_env()
-                plt.savefig(os.path.join(episode_dir, f'robot1_final.png'))
-                robot2.plot_env()
-                plt.savefig(os.path.join(episode_dir, f'robot2_final.png'))
+            save_plot(robot1, steps, 
+                     os.path.join(episode_dir, f'robot1_final_step_{steps:04d}.png'))
+            save_plot(robot2, steps, 
+                     os.path.join(episode_dir, f'robot2_final_step_{steps:04d}.png'))
             
-            # Record episode statistics
+            # Record statistics
             final_progress = robot1.get_exploration_progress()
             episode_stats['exploration_progress'].append(final_progress)
             episode_stats['steps'].append(steps)
@@ -159,12 +166,23 @@ def test_model(model_path, num_episodes=5, plot=True):
             state = robot1.reset()
             robot2.reset()
         
-        # Print overall results
+        # Print and save overall results
         print("\nOverall Test Results:")
-        print(f"Average steps: {np.mean(episode_stats['steps']):.2f}")
-        print(f"Average exploration progress: {np.mean(episode_stats['exploration_progress']):.1%}")
-        print(f"Average Robot1 path length: {np.mean(episode_stats['robot1_path_length']):.2f}")
-        print(f"Average Robot2 path length: {np.mean(episode_stats['robot2_path_length']):.2f}")
+        results = {
+            'Average steps': f"{np.mean(episode_stats['steps']):.2f}",
+            'Average exploration progress': f"{np.mean(episode_stats['exploration_progress']):.1%}",
+            'Average Robot1 path length': f"{np.mean(episode_stats['robot1_path_length']):.2f}",
+            'Average Robot2 path length': f"{np.mean(episode_stats['robot2_path_length']):.2f}"
+        }
+        
+        for key, value in results.items():
+            print(f"{key}: {value}")
+        
+        # Save statistics
+        with open(os.path.join(base_output_dir, 'test_statistics.txt'), 'w') as f:
+            f.write("Overall Test Results:\n")
+            for key, value in results.items():
+                f.write(f"{key}: {value}\n")
         
     except Exception as e:
         print(f"Error during testing: {str(e)}")
@@ -173,30 +191,26 @@ def test_model(model_path, num_episodes=5, plot=True):
         
     finally:
         # Cleanup
-        if plot:
-            for robot in [robot1, robot2]:
-                if robot is not None and hasattr(robot, 'cleanup_visualization'):
-                    robot.cleanup_visualization()
+        plt.close('all')  # Close any remaining figures
+        for robot in [robot1, robot2]:
+            if robot is not None and hasattr(robot, 'cleanup_visualization'):
+                robot.cleanup_visualization()
 
 def main():
-    # Specify model file
-    model_file = 'multi_robot_model_ep000420.h5'
-    model_path = os.path.join(MODEL_DIR, model_file)
-    
-    # Check if file exists
-    if not os.path.exists(model_path):
-        print(f"Error: Model file {model_path} does not exist")
-        print(f"Available files in {MODEL_DIR}:")
-        for file in os.listdir(MODEL_DIR):
-            print(f"  - {file}")
+    # Get latest model file
+    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith('.h5')]
+    if not model_files:
+        print(f"Error: No model files found in {MODEL_DIR}")
         return
+        
+    latest_model = sorted(model_files)[-1]
+    model_path = os.path.join(MODEL_DIR, latest_model)
     
-    print(f"\nUsing model: {model_file}")
+    print(f"\nUsing model: {latest_model}")
     print(f"Model path: {model_path}")
     
     # Run test
-    num_episodes = 5
-    test_model(model_path, num_episodes=num_episodes, plot=True)
+    test_model(model_path, num_episodes=5)
 
 if __name__ == '__main__':
     main()
