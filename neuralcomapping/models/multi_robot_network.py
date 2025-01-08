@@ -2,289 +2,338 @@ import tensorflow as tf
 import numpy as np
 from tensorflow.keras import layers, models, regularizers
 
-class MLPBlock(layers.Layer):
-    """Multi-layer perceptron block"""
-    def __init__(self, channels, do_bn=False):
+class MultiLayerPerceptron(layers.Layer):
+    """Simple MLP block"""
+    def __init__(self, layer_dims, activation='relu'):
         super().__init__()
         self.layers = []
-        n = len(channels)
+        for dim in layer_dims[1:]:
+            self.layers.append(layers.Dense(dim))
+            if activation:
+                self.layers.append(layers.Activation(activation))
         
-        for i in range(1, n):
-            self.layers.append(layers.Conv1D(
-                channels[i], 
-                kernel_size=1,
-                padding='valid',
-                use_bias=True))
-                
-            if i < (n-1):
-                if do_bn:
-                    self.layers.append(layers.BatchNormalization())
-                self.layers.append(layers.ReLU())
-
     def call(self, x, training=False):
         for layer in self.layers:
-            if isinstance(layer, layers.BatchNormalization):
-                x = layer(x, training=training)
-            else:
-                x = layer(x)
+            x = layer(x)
         return x
 
-class Encoder(layers.Layer):
-    """Joint encoding of state information using MLPs"""
-    def __init__(self, feature_dim, hidden_layers):
+class GraphAttention(layers.Layer):
+    """Graph attention for intra-graph operations"""
+    def __init__(self, feature_dim):
         super().__init__()
-        self.encoder = MLPBlock([4] + hidden_layers + [feature_dim])
-        self.dist_encoder = MLPBlock([1, feature_dim, feature_dim])
-
-    def call(self, inputs, dist, pos_history=None, goal_history=None, extras=None, training=False):
-        # Process frontiers
-        frontier_feats = self._process_frontiers(inputs)
-        frontier_enc = self.encoder(frontier_feats, training=training)
-        
-        # Process distances
-        dist_enc = self.dist_encoder(dist, training=training)
-        
-        # Process agents
-        agent_feats = self._process_agents(inputs, extras)
-        agent_enc = self.encoder(agent_feats, training=training)
-        
-        return frontier_enc, agent_enc, dist_enc
-        
-    def _process_frontiers(self, inputs):
-        """Process frontier information from input tensor
-        
-        Args:
-            inputs: Input tensor of shape [batch_size, channels, height, width]
-            
-        Returns:
-            Tensor of shape [batch_size, num_frontiers, 4]
-        """
-        batch_size = tf.shape(inputs)[0]
-        
-        # Convert frontiers to features using tf.where
-        frontiers = tf.where(tf.equal(inputs[:, 1], 1))  # Get frontier coordinates
-        
-        # Separate batch indices and coordinates
-        batch_indices = tf.cast(frontiers[:, 0], tf.int64)
-        y_coords = tf.cast(frontiers[:, 1], tf.float32)
-        x_coords = tf.cast(frontiers[:, 2], tf.float32)
-        
-        # Create feature tensor
-        num_frontiers = tf.shape(frontiers)[0]
-        features = tf.zeros([batch_size, num_frontiers, 4], dtype=tf.float32)
-        
-        # Create indices for scatter update
-        scatter_indices = tf.stack([
-            batch_indices,
-            tf.cast(tf.range(num_frontiers), tf.int64)
-        ], axis=1)
-        
-        # Create updates tensor with position and zero features
-        updates = tf.concat([
-            tf.stack([x_coords, y_coords], axis=1),
-            tf.zeros([num_frontiers, 2], dtype=tf.float32)
-        ], axis=1)
-        
-        # Perform scatter update
-        features = tf.tensor_scatter_nd_update(
-            features,
-            scatter_indices,
-            updates
-        )
-        
-        return features
-        
-    def _process_agents(self, inputs, extras):
-        """Process agent information
-        
-        Args:
-            inputs: Input tensor
-            extras: Extra features tensor containing agent information
-            
-        Returns:
-            Tensor of shape [batch_size, num_agents, 4]
-        """
-        batch_size = tf.shape(inputs)[0]
-        num_agents = tf.shape(extras)[1]
-        
-        # Create agent feature tensor
-        features = tf.zeros([batch_size, num_agents, 4], dtype=tf.float32)
-        
-        # Create indices for each batch and agent with consistent types
-        batch_indices = tf.reshape(
-            tf.cast(tf.tile(tf.range(batch_size)[:, None], [1, num_agents]), tf.int64),
-            [-1]
-        )
-        agent_indices = tf.tile(tf.range(num_agents, dtype=tf.int64)[None, :], [batch_size, 1])
-        agent_indices = tf.reshape(agent_indices, [-1])
-        
-        # Stack indices for scatter update
-        scatter_indices = tf.stack([batch_indices, agent_indices], axis=1)
-        
-        # Reshape extras for updates
-        updates = tf.reshape(extras, [-1, 4])
-        
-        # Perform scatter update
-        features = tf.tensor_scatter_nd_update(
-            features,
-            scatter_indices,
-            updates
-        )
-        
-        return features
-
-class AttentionModule(layers.Layer):
-    """Multi-head attention module"""
-    def __init__(self, feature_dim, num_heads=8):
-        super().__init__()
-        self.num_heads = num_heads
         self.feature_dim = feature_dim
+        # Adjust dimensions to match input size
+        self.query = layers.Dense(feature_dim, use_bias=False)
+        self.key = layers.Dense(feature_dim, use_bias=False)
+        self.value = layers.Dense(feature_dim, use_bias=False)
         
-        assert feature_dim % num_heads == 0
-        self.depth = feature_dim // num_heads
+    def build(self, input_shape):
+        # Add explicit feature projection if needed
+        input_dim = input_shape[-1]
+        if input_dim != self.feature_dim:
+            self.input_projection = layers.Dense(self.feature_dim)
+        else:
+            self.input_projection = None
+        super().build(input_shape)
         
-        self.wq = layers.Dense(feature_dim)
-        self.wk = layers.Dense(feature_dim) 
-        self.wv = layers.Dense(feature_dim)
-        
-        self.dense = layers.Dense(feature_dim)
-        
-    def split_heads(self, x, batch_size):
-        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
-        return tf.transpose(x, perm=[0, 2, 1, 3])
-        
-    def call(self, query, key, value, mask=None, training=False):
-        batch_size = tf.shape(query)[0]
-        
-        # Linear layers
-        q = self.wq(query)  
-        k = self.wk(key)
-        v = self.wv(value)
-        
-        # Split heads
-        q = self.split_heads(q, batch_size)
-        k = self.split_heads(k, batch_size)
-        v = self.split_heads(v, batch_size)
-        
-        # Scaled dot-product attention
-        matmul_qk = tf.matmul(q, k, transpose_b=True)
-        dk = tf.cast(tf.shape(k)[-1], tf.float32)
-        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-        
-        if mask is not None:
-            scaled_attention_logits += (mask * -1e9)
+    def call(self, node_features, training=False):
+        # Project input features if necessary
+        if self.input_projection is not None:
+            node_features = self.input_projection(node_features)
             
-        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
-        attention_output = tf.matmul(attention_weights, v)
+        # Compute Q, K, V
+        q = self.query(node_features)  # [batch_size, num_nodes, feature_dim]
+        k = self.key(node_features)    # [batch_size, num_nodes, feature_dim]
+        v = self.value(node_features)  # [batch_size, num_nodes, feature_dim]
         
-        # Reshape output
-        attention_output = tf.transpose(attention_output, perm=[0, 2, 1, 3])
-        concat_attention = tf.reshape(attention_output, (batch_size, -1, self.feature_dim))
+        # Compute attention weights
+        attention = tf.matmul(q, k, transpose_b=True)  # [batch_size, num_nodes, num_nodes]
+        attention_scale = tf.sqrt(tf.cast(self.feature_dim, tf.float32))
+        attention = tf.nn.softmax(attention / attention_scale)
         
-        output = self.dense(concat_attention)
+        # Apply attention to values
+        output = tf.matmul(attention, v)  # [batch_size, num_nodes, feature_dim]
         
-        return output, attention_weights
+        return output, attention
 
-class GNNLayer(layers.Layer):
-    """Graph neural network layer"""
-    def __init__(self, feature_dim, num_heads=8):
+class GraphNode(layers.Layer):
+    """Graph node feature processor"""
+    def __init__(self, feature_dim):
         super().__init__()
-        self.attention = AttentionModule(feature_dim, num_heads)
-        self.ffn = tf.keras.Sequential([
-            layers.Dense(feature_dim * 2, activation='relu'),
-            layers.Dense(feature_dim)
-        ])
-        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
+        self.mlp = MultiLayerPerceptron([feature_dim * 2, feature_dim])
         
-    def call(self, x, training=False, mask=None):
-        # Multi-head attention
-        attn_output, _ = self.attention(x, x, x, mask, training=training)
-        out1 = self.layernorm1(x + attn_output)
+    def call(self, node_feature, aggregated_message, training=False):
+        combined = tf.concat([node_feature, aggregated_message], axis=-1)
+        return self.mlp(combined)
+
+class InterGraphOperation(layers.Layer):
+    """Cross-graph operation between robot and frontier nodes"""
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.edge_mlp = MultiLayerPerceptron([feature_dim * 3, feature_dim, 1])
+        self.node_processor = GraphNode(feature_dim)
         
-        # Feed forward network
-        ffn_output = self.ffn(out1)
-        return self.layernorm2(out1 + ffn_output)
+    class InterGraphOperation(layers.Layer):
+        """Cross-graph operation between robot and frontier nodes"""
+        def __init__(self, feature_dim):
+            super().__init__()
+            self.edge_mlp = MultiLayerPerceptron([feature_dim * 3, feature_dim, 1])
+            self.node_processor = GraphNode(feature_dim)
+            
+        def call(self, robot_features, frontier_features, geodesic_distances, training=False):
+            batch_size = tf.shape(robot_features)[0]
+            num_robots = tf.shape(robot_features)[1]
+            num_frontiers = tf.shape(frontier_features)[1]
+            feature_dim = robot_features.shape[-1]
+            
+            # Reshape features for cross attention
+            robots_expanded = tf.reshape(robot_features, [batch_size, num_robots, 1, feature_dim])
+            frontiers_expanded = tf.reshape(frontier_features, [batch_size, 1, num_frontiers, feature_dim])
+            
+            # Repeat features to match dimensions
+            robots_tiled = tf.repeat(robots_expanded, repeats=num_frontiers, axis=2)
+            frontiers_tiled = tf.repeat(frontiers_expanded, repeats=num_robots, axis=1)
+            
+            # Properly handle geodesic distances
+            # Reshape and expand dimensions to match the feature dimensions
+            distances_expanded = tf.expand_dims(geodesic_distances, -1)  # Add feature dimension
+            distances_expanded = tf.tile(
+                distances_expanded, 
+                [1, 1, 1, feature_dim]
+            )
+            
+            # Concatenate features with geodesic distance
+            edge_inputs = tf.concat([robots_tiled, frontiers_tiled, distances_expanded], axis=-1)
+            
+            # Compute edge features (affinities)
+            edge_features = self.edge_mlp(edge_inputs)
+            edge_weights = tf.nn.softmax(tf.squeeze(edge_features, -1))
+            
+            # Update robot features
+            robot_messages = tf.matmul(edge_weights, frontier_features)
+            new_robot_features = self.node_processor(robot_features, robot_messages)
+            
+            return new_robot_features, edge_weights
+
+class IntraGraphOperation(layers.Layer):
+    """Internal graph operations for robot and frontier nodes"""
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.attention = GraphAttention(feature_dim)
+        self.node_processor = GraphNode(feature_dim)
+        
+    def call(self, node_features, training=False):
+        # Apply self-attention
+        attention_output = self.attention(node_features, training=training)
+        if isinstance(attention_output, tuple):
+            attended_features, attention_weights = attention_output
+        else:
+            attended_features = attention_output
+            attention_weights = None
+        
+        # Update node features
+        new_features = self.node_processor(node_features, attended_features)
+        
+        return new_features, attention_weights
 
 class MultiRobotNetwork(tf.keras.Model):
     def __init__(self, input_shape=(84, 84, 1), num_robots=2, feature_dim=128, num_gnn_layers=3):
         super().__init__()
-        self.num_robots = num_robots
         self.feature_dim = feature_dim
+        self.num_robots = num_robots
+        self.num_gnn_layers = num_gnn_layers
         
-        # Encoders
-        self.encoder = Encoder(feature_dim, [32, 64, 128])
+        # CNN for processing occupancy maps
+        self.cnn = tf.keras.Sequential([
+            layers.Conv2D(32, 3, activation='relu', padding='same', input_shape=input_shape),
+            layers.MaxPooling2D(2),
+            layers.Conv2D(64, 3, activation='relu', padding='same'),
+            layers.MaxPooling2D(2),
+            layers.Conv2D(128, 3, activation='relu', padding='same'),
+            layers.GlobalAveragePooling2D()
+        ])
         
-        # GNN layers
-        self.gnn_layers = [GNNLayer(feature_dim) for _ in range(num_gnn_layers)]
+        # Feature initialization
+        self.robot_init = tf.keras.Sequential([
+            layers.Dense(32, activation='relu'),
+            layers.Dense(64, activation='relu'),
+            layers.Dense(feature_dim // 2)
+        ])
         
-        # Policy heads (one per robot)
-        self.policy_heads = [
-            tf.keras.Sequential([
-                layers.Dense(256, activation='relu', kernel_regularizer=regularizers.l2(0.01)),
-                layers.Dense(128, activation='relu', kernel_regularizer=regularizers.l2(0.01)),
-                layers.Dense(1)  # Output logits for each frontier
-            ]) for _ in range(num_robots)
-        ]
+        # Feature processing layers
+        self.frontier_projection = tf.keras.Sequential([
+            layers.Dense(32, activation='relu'),
+            layers.Dense(64, activation='relu'),
+            layers.Dense(feature_dim)
+        ])
+        
+        # Occupancy feature projection
+        self.occupancy_proj = layers.Dense(feature_dim // 2)
+        
+        # Attention layers
+        self.robot_query = layers.Dense(feature_dim)
+        self.frontier_query = layers.Dense(feature_dim)
+        self.robot_key = layers.Dense(feature_dim)
+        self.frontier_key = layers.Dense(feature_dim)
+        self.robot_value = layers.Dense(feature_dim)
+        self.frontier_value = layers.Dense(feature_dim)
+        
+        # Output projection
+        self.output_proj = layers.Dense(feature_dim)
         
         # Value heads (one per robot)
-        self.value_heads = [
-            tf.keras.Sequential([
-                layers.Dense(256, activation='relu', kernel_regularizer=regularizers.l2(0.01)),
-                layers.Dense(128, activation='relu', kernel_regularizer=regularizers.l2(0.01)),
-                layers.Dense(1)  # State value
-            ]) for _ in range(num_robots)
-        ]
+        self.value_heads = []
+        for _ in range(num_robots):
+            head = tf.keras.Sequential([
+                layers.Dense(64, activation='relu'),
+                layers.Dense(1)
+            ])
+            self.value_heads.append(head)
+            
+    def build(self, input_shape):
+        # Call parent build
+        super().build(input_shape)
+        
+        # Build state processor
+        dummy_state = tf.zeros((1,) + input_shape[0][1:])
+        _ = self.cnn(dummy_state)
+        
+        # Build feature processors
+        dummy_robot = tf.zeros((1, 2))
+        dummy_frontier = tf.zeros((1, 2))
+        
+        _ = self.robot_init(dummy_robot)
+        _ = self.frontier_projection(dummy_frontier)
+        _ = self.occupancy_proj(tf.zeros((1, 128)))
+        
+        # Build attention layers
+        dummy_features = tf.zeros((1, 1, self.feature_dim))
+        _ = self.robot_query(dummy_features)
+        _ = self.frontier_query(dummy_features)
+        _ = self.robot_key(dummy_features)
+        _ = self.frontier_key(dummy_features)
+        _ = self.robot_value(dummy_features)
+        _ = self.frontier_value(dummy_features)
+        
+        # Build output projection
+        _ = self.output_proj(dummy_features)
+        
+        # Build value heads
+        dummy_value_input = tf.zeros((1, self.feature_dim * 2))
+        for head in self.value_heads:
+            _ = head(dummy_value_input)
 
+    @tf.function
+    def process_features(self, poses, processor):
+        """Generic feature processor that avoids tensor capturing issues"""
+        # Process each position individually using map_fn
+        return tf.map_fn(
+            lambda x: processor(x[None])[0],  # Add and remove batch dim for each item
+            poses,
+            dtype=tf.float32,
+            parallel_iterations=10
+        )
+
+    @tf.function
+    def compute_attention(self, query, key, value, scale=True):
+        """Compute scaled dot-product attention"""
+        # Compute attention scores
+        attention = tf.matmul(query, key, transpose_b=True)
+        
+        if scale:
+            d_k = tf.cast(tf.shape(key)[-1], tf.float32)
+            attention = attention / tf.sqrt(d_k)
+            
+        # Apply softmax
+        attention_weights = tf.nn.softmax(attention, axis=-1)
+        
+        # Apply attention to values
+        output = tf.matmul(attention_weights, value)
+        
+        return output, attention_weights
+
+    @tf.function
     def call(self, inputs, training=False):
         states, frontiers, robot_poses, robot_targets = inputs
-        
-        # Encode observations
-        frontier_enc, agent_enc, dist_enc = self.encoder(
-            states, 
-            frontiers,
-            robot_poses,
-            robot_targets,
-            tf.concat([robot_poses, robot_targets], axis=-1),
-            training=training
-        )
-        
-        # Process through GNN layers
-        x = frontier_enc
-        for gnn_layer in self.gnn_layers:
-            x = gnn_layer(x, training=training)
-            
-        # Ensure x has proper shape for concatenation
         batch_size = tf.shape(states)[0]
-        if tf.shape(x)[1] == 0:  # If no frontiers found
-            x = tf.zeros([batch_size, 1, self.feature_dim])
-            
-        # Get policies and values for each robot
-        policies = []
-        values = []
         
-        for i in range(self.num_robots):
-            # Extract features for current robot
-            agent_features = tf.expand_dims(agent_enc[:, i], 1)  # Add extra dimension to match shape
-            robot_features = tf.concat([x, tf.tile(agent_features, [1, tf.shape(x)[1], 1])], axis=-1)
+        # Process state through CNN
+        state_features = self.cnn(states)  # [batch_size, cnn_features]
+        
+        # Process robot features
+        robot_features = tf.map_fn(
+            lambda x: self.robot_init(x),
+            robot_poses,
+            dtype=tf.float32
+        )  # [batch_size, num_robots, feature_dim//2]
+        
+        # Add occupancy information
+        occupancy_features = self.occupancy_proj(state_features)  # [batch_size, feature_dim//2]
+        occupancy_features = tf.expand_dims(occupancy_features, 1)  # [batch_size, 1, feature_dim//2]
+        occupancy_features = tf.tile(
+            occupancy_features, [1, self.num_robots, 1]
+        )  # [batch_size, num_robots, feature_dim//2]
+        
+        # Combine robot and occupancy features
+        robot_features = tf.concat(
+            [robot_features, occupancy_features], axis=-1
+        )  # [batch_size, num_robots, feature_dim]
+        
+        # Process frontier features
+        frontier_features = tf.map_fn(
+            lambda x: self.frontier_projection(x),
+            frontiers,
+            dtype=tf.float32
+        )  # [batch_size, num_frontiers, feature_dim]
+        
+        # Apply graph neural network layers
+        final_affinity = None
+        
+        for _ in range(self.num_gnn_layers):
+            # Self-attention for robots
+            robot_q = self.robot_query(robot_features)
+            robot_k = self.robot_key(robot_features)
+            robot_v = self.robot_value(robot_features)
+            robot_output, _ = self.compute_attention(robot_q, robot_k, robot_v)
+            robot_features = robot_features + robot_output
             
-            # Get policy (one logit per frontier)
-            policy = self.policy_heads[i](robot_features)  # Shape: [batch_size, num_frontiers, 1]
-            policy = tf.squeeze(policy, axis=-1)  # Shape: [batch_size, num_frontiers]
+            # Self-attention for frontiers
+            frontier_q = self.frontier_query(frontier_features)
+            frontier_k = self.frontier_key(frontier_features)
+            frontier_v = self.frontier_value(frontier_features)
+            frontier_output, _ = self.compute_attention(frontier_q, frontier_k, frontier_v)
+            frontier_features = frontier_features + frontier_output
             
-            # Get value
-            pooled_features = tf.reduce_mean(robot_features, axis=1)  # Global average pooling
-            value = self.value_heads[i](pooled_features)
+            # Cross attention for assignment
+            layer_affinity = tf.matmul(
+                self.output_proj(robot_features),
+                self.output_proj(frontier_features),
+                transpose_b=True
+            )
             
-            policies.append(policy)
-            values.append(value)
-            
-        return policies, values
+            if final_affinity is None:
+                final_affinity = layer_affinity
+            else:
+                final_affinity = final_affinity + layer_affinity
+        
+        # Average across layers and compute probabilities
+        final_affinity = final_affinity / tf.cast(self.num_gnn_layers, tf.float32)
+        assignment_probs = tf.nn.softmax(final_affinity, axis=-1)
+        
+        # Compute values
+        values = []
+        value_features = tf.concat([
+            state_features,
+            tf.reduce_mean(robot_features, axis=1)
+        ], axis=-1)
+        
+        for head in self.value_heads:
+            values.append(head(value_features))
+        
+        return tf.unstack(assignment_probs, axis=1), values
 
     def save(self, filepath):
-        """Save model weights"""
         self.save_weights(filepath)
-
+        
     def load(self, filepath):
-        """Load model weights"""
         self.load_weights(filepath)
