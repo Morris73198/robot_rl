@@ -204,7 +204,7 @@ def test_model(model_path, num_episodes=5, plot=True):
 
 def main():
     # 指定要使用的模型文件
-    model_file = 'multi_robot_model_ep000120.h5'
+    model_file = 'multi_robot_model_simple_ep000120.h5'
     model_path = os.path.join(MODEL_DIR, model_file)
     
     # 檢查文件是否存在
