@@ -19,7 +19,7 @@ class MultiRobotTrainer:
         self.map_size = self.robot1.map_size
         
         # 訓練參數
-        self.epsilon = 1.0
+        self.epsilon = 0.0
         self.epsilon_min = 0.1
         self.epsilon_decay = 0.995
         
@@ -79,7 +79,7 @@ class MultiRobotTrainer:
         """為兩個機器人選擇動作"""
         if len(frontiers) == 0:
             return 0, 0
-            
+                
         MIN_TARGET_DISTANCE = 50
         
         # epsilon-greedy策略
@@ -92,18 +92,18 @@ class MultiRobotTrainer:
                     i for i in valid_frontiers1 
                     if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) >= MIN_TARGET_DISTANCE
                 ]
-                
+                    
             if self.robot1.current_target_frontier is not None:
                 valid_frontiers2 = [
                     i for i in valid_frontiers2 
                     if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) >= MIN_TARGET_DISTANCE
                 ]
-                
+                    
             if not valid_frontiers1:
                 valid_frontiers1 = list(range(min(self.model.max_frontiers, len(frontiers))))
             if not valid_frontiers2:
                 valid_frontiers2 = list(range(min(self.model.max_frontiers, len(frontiers))))
-                
+                    
             robot1_action = np.random.choice(valid_frontiers1)
             robot2_action = np.random.choice(valid_frontiers2)
             return robot1_action, robot2_action
@@ -121,25 +121,31 @@ class MultiRobotTrainer:
         robot2_target_batch = np.expand_dims(robot2_target, 0)
         
         predictions = self.model.predict(
-            state_batch, frontiers_batch, 
-            robot1_pos_batch, robot2_pos_batch,
-            robot1_target_batch, robot2_target_batch
+            state_batch, 
+            frontiers_batch,
+            robot1_pos_batch, 
+            robot2_pos_batch,
+            robot1_target_batch, 
+            robot2_target_batch
         )
         
+        # 獲取有效的Q值
         valid_frontiers = min(self.model.max_frontiers, len(frontiers))
         robot1_q = predictions['robot1'][0, :valid_frontiers].copy()
         robot2_q = predictions['robot2'][0, :valid_frontiers].copy()
         
-        # 根據其他機器人的目標調整Q值
-        if self.robot2.current_target_frontier is not None:
-            for i in range(valid_frontiers):
-                if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) < MIN_TARGET_DISTANCE:
-                    robot1_q[i] *= 0.0001
-                    
-        if self.robot1.current_target_frontier is not None:
-            for i in range(valid_frontiers):
-                if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) < MIN_TARGET_DISTANCE:
-                    robot2_q[i] *= 0.0001
+        # 避免選擇相同或太近的目標
+        for i in range(valid_frontiers):
+            if robot1_q[i] > robot2_q[i]:
+                robot2_q[i] *= 0.5
+            else:
+                robot1_q[i] *= 0.5
+                
+            # 考慮距離因素
+            for j in range(valid_frontiers):
+                if i != j and np.linalg.norm(frontiers[i] - frontiers[j]) < MIN_TARGET_DISTANCE:
+                    robot1_q[j] *= 0.5
+                    robot2_q[j] *= 0.5
         
         robot1_action = np.argmax(robot1_q)
         robot2_action = np.argmax(robot2_q)
@@ -554,7 +560,7 @@ class MultiRobotTrainer:
         ep_str = str(episode).zfill(6)
         
         # 保存模型
-        model_path = os.path.join(MODEL_DIR, f'multi_robot_model_ep{ep_str}.h5')
+        model_path = os.path.join(MODEL_DIR, f'multi_robot_model_attention_ep{ep_str}.h5')
         self.model.save(model_path)
         
         # 保存訓練歷史
