@@ -640,6 +640,9 @@ class Robot:
                 if remaining_path.shape[1] > 1:
                     plt.plot(remaining_path[0, 1], remaining_path[1, 1], 'x', 
                             color=path_color, markersize=8, label='Next Point')
+                
+                plt.plot(remaining_path[0, -1], remaining_path[1, -1], 's',
+                         color=path_color, markersize=10, label='Goal')
         
         # 5. 繪製當前位置
         plt.plot(self.robot_position[0], self.robot_position[1], 

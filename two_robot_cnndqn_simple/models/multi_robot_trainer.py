@@ -95,80 +95,80 @@ class MultiRobotTrainer:
         
         return padded
     
-    def choose_actions(self, state, frontiers, robot1_pos, robot2_pos):
-        """為兩個機器人選擇動作
+    # def choose_actions(self, state, frontiers, robot1_pos, robot2_pos):
+    #     """為兩個機器人選擇動作
         
-        Args:
-            state: 當前狀態
-            frontiers: 可用的frontier點
-            robot1_pos: Robot1的位置
-            robot2_pos: Robot2的位置
+    #     Args:
+    #         state: 當前狀態
+    #         frontiers: 可用的frontier點
+    #         robot1_pos: Robot1的位置
+    #         robot2_pos: Robot2的位置
             
-        Returns:
-            tuple(int, int): (Robot1的動作, Robot2的動作)
-        """
-        if len(frontiers) == 0:
-            return 0, 0
+    #     Returns:
+    #         tuple(int, int): (Robot1的動作, Robot2的動作)
+    #     """
+    #     if len(frontiers) == 0:
+    #         return 0, 0
             
-        MIN_TARGET_DISTANCE = 50  # 最小目標距離閾值
+    #     MIN_TARGET_DISTANCE = 50  # 最小目標距離閾值
         
-        # epsilon-greedy策略
-        if np.random.random() < self.epsilon:
-            valid_frontiers1 = list(range(min(self.model.max_frontiers, len(frontiers))))
-            valid_frontiers2 = valid_frontiers1.copy()
+    #     # epsilon-greedy策略
+    #     if np.random.random() < self.epsilon:
+    #         valid_frontiers1 = list(range(min(self.model.max_frontiers, len(frontiers))))
+    #         valid_frontiers2 = valid_frontiers1.copy()
             
-            # 檢查Robot2的當前目標
-            if self.robot2.current_target_frontier is not None:
-                valid_frontiers1 = [
-                    i for i in valid_frontiers1 
-                    if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) >= MIN_TARGET_DISTANCE
-                ]
+    #         # 檢查Robot2的當前目標
+    #         if self.robot2.current_target_frontier is not None:
+    #             valid_frontiers1 = [
+    #                 i for i in valid_frontiers1 
+    #                 if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) >= MIN_TARGET_DISTANCE
+    #             ]
                 
-            # 檢查Robot1的當前目標
-            if self.robot1.current_target_frontier is not None:
-                valid_frontiers2 = [
-                    i for i in valid_frontiers2 
-                    if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) >= MIN_TARGET_DISTANCE
-                ]
+    #         # 檢查Robot1的當前目標
+    #         if self.robot1.current_target_frontier is not None:
+    #             valid_frontiers2 = [
+    #                 i for i in valid_frontiers2 
+    #                 if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) >= MIN_TARGET_DISTANCE
+    #             ]
                 
-            if not valid_frontiers1:
-                valid_frontiers1 = list(range(min(self.model.max_frontiers, len(frontiers))))
-            if not valid_frontiers2:
-                valid_frontiers2 = list(range(min(self.model.max_frontiers, len(frontiers))))
+    #         if not valid_frontiers1:
+    #             valid_frontiers1 = list(range(min(self.model.max_frontiers, len(frontiers))))
+    #         if not valid_frontiers2:
+    #             valid_frontiers2 = list(range(min(self.model.max_frontiers, len(frontiers))))
                 
-            robot1_action = np.random.choice(valid_frontiers1)
-            robot2_action = np.random.choice(valid_frontiers2)
-            return robot1_action, robot2_action
+    #         robot1_action = np.random.choice(valid_frontiers1)
+    #         robot2_action = np.random.choice(valid_frontiers2)
+    #         return robot1_action, robot2_action
         
-        # 使用模型預測
-        state_batch = np.expand_dims(state, 0)
-        frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0)
-        robot1_pos_batch = np.expand_dims(robot1_pos, 0)
-        robot2_pos_batch = np.expand_dims(robot2_pos, 0)
+    #     # 使用模型預測
+    #     state_batch = np.expand_dims(state, 0)
+    #     frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0)
+    #     robot1_pos_batch = np.expand_dims(robot1_pos, 0)
+    #     robot2_pos_batch = np.expand_dims(robot2_pos, 0)
         
-        predictions = self.model.predict(
-            state_batch, frontiers_batch, robot1_pos_batch, robot2_pos_batch
-        )
+    #     predictions = self.model.predict(
+    #         state_batch, frontiers_batch, robot1_pos_batch, robot2_pos_batch
+    #     )
         
-        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-        robot1_q = predictions['robot1'][0, :valid_frontiers].copy()
-        robot2_q = predictions['robot2'][0, :valid_frontiers].copy()
+    #     valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+    #     robot1_q = predictions['robot1'][0, :valid_frontiers].copy()
+    #     robot2_q = predictions['robot2'][0, :valid_frontiers].copy()
         
-        # 根據其他機器人的目標調整Q值
-        # if self.robot2.current_target_frontier is not None:
-        #     for i in range(valid_frontiers):
-        #         if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) < MIN_TARGET_DISTANCE:
-        #             robot1_q[i] *= 0.0001  # 大幅降低太近的目標的Q值
+    #     # 根據其他機器人的目標調整Q值
+    #     # if self.robot2.current_target_frontier is not None:
+    #     #     for i in range(valid_frontiers):
+    #     #         if np.linalg.norm(frontiers[i] - self.robot2.current_target_frontier) < MIN_TARGET_DISTANCE:
+    #     #             robot1_q[i] *= 0.0001  # 大幅降低太近的目標的Q值
                     
-        # if self.robot1.current_target_frontier is not None:
-        #     for i in range(valid_frontiers):
-        #         if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) < MIN_TARGET_DISTANCE:
-        #             robot2_q[i] *= 0.0001  # 大幅降低太近的目標的Q值
+    #     # if self.robot1.current_target_frontier is not None:
+    #     #     for i in range(valid_frontiers):
+    #     #         if np.linalg.norm(frontiers[i] - self.robot1.current_target_frontier) < MIN_TARGET_DISTANCE:
+    #     #             robot2_q[i] *= 0.0001  # 大幅降低太近的目標的Q值
         
-        robot1_action = np.argmax(robot1_q)
-        robot2_action = np.argmax(robot2_q)
+    #     robot1_action = np.argmax(robot1_q)
+    #     robot2_action = np.argmax(robot2_q)
         
-        return robot1_action, robot2_action
+    #     return robot1_action, robot2_action
 
     def train_step(self):
         """執行一步訓練
@@ -274,8 +274,9 @@ class MultiRobotTrainer:
         
         
         # 更新探索率
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        # if self.epsilon > self.epsilon_min:
+        #     self.epsilon *= self.epsilon_decay
+        #     print(f"探索率: {self.epsilon:.3f}")
         
         return loss
     
@@ -312,52 +313,45 @@ class MultiRobotTrainer:
                     # 獲取當前狀態
                     robot1_pos = self.robot1.get_normalized_position()
                     robot2_pos = self.robot2.get_normalized_position()
+
+                    # 使用模型預測動作
+                    state_batch = np.expand_dims(state, 0)
+                    frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0)
+                    robot1_pos_batch = np.expand_dims(robot1_pos, 0)
+                    robot2_pos_batch = np.expand_dims(robot2_pos, 0)
                     
-                    # Robot 1 目標選擇和移動
-                    if not robot1_in_progress:
-                        # 只有在沒有進行中的任務時才選擇新目標
-                        robot1_action, _ = self.choose_actions(
-                            state, frontiers, robot1_pos, robot2_pos
+                    # 選擇動作（使用epsilon-greedy策略）
+                    if np.random.random() < self.epsilon:
+                        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+                        robot1_action = np.random.randint(valid_frontiers)
+                        robot2_action = np.random.randint(valid_frontiers)
+                    else:
+                        predictions = self.model.predict(
+                            state_batch, frontiers_batch, robot1_pos_batch, robot2_pos_batch
                         )
-                        robot1_target = frontiers[robot1_action]
-                        robot1_in_progress = True
-                    
-                    # Robot 2 目標選擇和移動
-                    if not robot2_in_progress:
-                        # 只有在沒有進行中的任務時才選擇新目標
-                        _, robot2_action = self.choose_actions(
-                            state, frontiers, robot1_pos, robot2_pos
-                        )
-                        robot2_target = frontiers[robot2_action]
-                        robot2_in_progress = True
+                        
+                        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+                        robot1_q = predictions['robot1'][0, :valid_frontiers].copy()
+                        robot2_q = predictions['robot2'][0, :valid_frontiers].copy()
+
+                        robot1_action = np.argmax(robot1_q)
+                        robot2_action = np.argmax(robot2_q)
 
                     # 執行移動並獲取獎勵
                     robot1_reward = 0
                     robot2_reward = 0
                     
                     # Robot 1 移動
-                    if robot1_in_progress and robot1_target is not None:
-                        next_state1, r1, d1 = self.robot1.move_to_frontier(robot1_target)
-                        robot1_reward = r1
-                        if d1:  # 只有在完成目標時才重置狀態
-                            robot1_in_progress = False
-                            robot1_target = None
-                    else:
-                        next_state1 = robot1_state
+                    next_state1, r1, d1 = self.robot1.move_to_frontier(frontiers[robot1_action])
+                    robot1_reward = r1
                     
                     # 更新地圖
                     self.robot2.op_map = self.robot1.op_map.copy()
                     
-                    # Robot 2 移動
-                    if robot2_in_progress and robot2_target is not None:
-                        next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target)
-                        robot2_reward = r2
-                        if d2:  # 只有在完成目標時才重置狀態
-                            robot2_in_progress = False
-                            robot2_target = None
-                    else:
-                        next_state2 = robot2_state
-                    
+                    # Robot 2 移動 
+                    next_state2, r2, d2 = self.robot2.move_to_frontier(frontiers[robot2_action])
+                    robot2_reward = r2
+
                     # 確保地圖同步
                     self.robot1.op_map = self.robot2.op_map.copy()
                     
@@ -366,34 +360,26 @@ class MultiRobotTrainer:
                     self.robot2.other_robot_position = self.robot1.robot_position.copy()
                     
                     # 更新狀態
-                    robot1_state = next_state1
-                    robot2_state = next_state2
                     state = next_state1  # 使用共享地圖狀態
                     
-                    # 只有在任務完成時才進行經驗存儲和訓練
-                    if not robot1_in_progress or not robot2_in_progress:
-                        next_frontiers = self.robot1.get_frontiers()
-                        next_robot1_pos = self.robot1.get_normalized_position()
-                        next_robot2_pos = self.robot2.get_normalized_position()
-                        
-                        self.remember(
-                            state, frontiers, robot1_pos, robot2_pos,
-                            robot1_action if not robot1_in_progress else 0,
-                            robot2_action if not robot2_in_progress else 0,
-                            robot1_reward, robot2_reward,
-                            state, next_frontiers, next_robot1_pos, next_robot2_pos,
-                            not robot1_in_progress or not robot2_in_progress
-                        )
-                        
-                        loss = self.train_step()
-                        # if loss is not None and isinstance(loss, (int, float)):
-                        #     episode_losses.append(loss)
-                        if loss is not None:
-                            # 如果是列表，取平均值
-                            if isinstance(loss, list):
-                                episode_losses.append(np.mean(loss))
-                            elif isinstance(loss, (int, float)):
-                                episode_losses.append(loss)
+                    # 進行經驗存儲和訓練
+                    next_frontiers = self.robot1.get_frontiers()
+                    next_robot1_pos = self.robot1.get_normalized_position()
+                    next_robot2_pos = self.robot2.get_normalized_position()
+                    
+                    self.remember(
+                        state, frontiers, robot1_pos, robot2_pos, 
+                        robot1_action, robot2_action, robot1_reward, robot2_reward,
+                        state, next_frontiers, next_robot1_pos, next_robot2_pos, 
+                        d1 or d2
+                    )
+                    
+                    loss = self.train_step()
+                    if loss is not None:
+                        if isinstance(loss, list):
+                            episode_losses.append(np.mean(loss))
+                        elif isinstance(loss, (int, float)):
+                            episode_losses.append(loss)
                     
                     # 更新獎勵統計
                     total_reward += (robot1_reward + robot2_reward)
@@ -430,6 +416,7 @@ class MultiRobotTrainer:
                 # 更新探索率
                 if self.epsilon > self.epsilon_min:
                     self.epsilon *= self.epsilon_decay
+                    print(f"探索率: {self.epsilon:.3f}")
                 
                 # 列印訓練信息
                 print(f"\n第 {episode + 1}/{episodes} 輪 (地圖 {self.robot1.li_map})")
