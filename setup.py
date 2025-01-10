@@ -14,8 +14,8 @@ class get_pybind_include(object):
 
 ext_modules = [
     Extension(
-        "frontier_exploration.utils.inverse_sensor_model",
-        ["frontier_exploration/utils/inverse_sensor_model.cpp"],
+        "one_robot_cnndqn.utils.inverse_sensor_model",
+        ["one_robot_cnndqn/utils/inverse_sensor_model.cpp"],
         include_dirs=[
             get_pybind_include(),
             get_pybind_include(user=True),
@@ -23,16 +23,7 @@ ext_modules = [
         ],
         language='c++'
     ),
-    Extension(
-        "frontier_exploration.utils.astar",
-        ["frontier_exploration/utils/astar.cpp"],
-        include_dirs=[
-            get_pybind_include(),
-            get_pybind_include(user=True),
-            "/usr/include/eigen3"  # 添加 Eigen 
-        ],
-        language='c++'
-    )
+    
 ]
 
 # 添加 C++11
