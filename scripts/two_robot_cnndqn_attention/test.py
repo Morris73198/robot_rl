@@ -198,15 +198,21 @@ def test_model(model_path, num_episodes=5):
 
 def main():
     # Get latest model file
-    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith('.h5')]
-    if not model_files:
-        print(f"Error: No model files found in {MODEL_DIR}")
-        return
+    # model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith('.h5')]
+    # if not model_files:
+    #     print(f"Error: No model files found in {MODEL_DIR}")
+    #     return
         
-    latest_model = sorted(model_files)[-1]
-    model_path = os.path.join(MODEL_DIR, latest_model)
+    # latest_model = sorted(model_files)[-1]
+    # model_path = os.path.join(MODEL_DIR, latest_model)
     
-    print(f"\nUsing model: {latest_model}")
+    model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000020.h5')
+    
+    if not os.path.exists(model_path):
+        print(f"Error: Model file not found at {model_path}")
+        exit(1)
+    
+    # print(f"\nUsing model: {latest_model}")
     print(f"Model path: {model_path}")
     
     # Run test

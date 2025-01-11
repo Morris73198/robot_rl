@@ -312,9 +312,11 @@ class MultiRobotTrainer:
                     
                     # 移動機器人
                     next_state1, r1, d1 = self.robot1.move_to_frontier(robot1_target)
+                    robot1_reward = r1
                     self.robot2.op_map = self.robot1.op_map.copy()
                     
                     next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target)
+                    robot2_reward = r2
                     self.robot1.op_map = self.robot2.op_map.copy()
                     
                     # 更新機器人位置
@@ -322,8 +324,8 @@ class MultiRobotTrainer:
                     self.robot2.other_robot_position = self.robot1.robot_position.copy()
                     
                     # 計算獎勵
-                    robot1_reward = r1
-                    robot2_reward = r2
+                    
+                    
                     
                     # 保存經驗到回放緩衝區
                     if d1 or d2:
