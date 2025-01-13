@@ -430,9 +430,9 @@ class MultiRobotTrainer:
         
         # 繪製總獎勵
         axs[0].plot(episodes, self.training_history['episode_rewards'], color='#2E8B57')  # 深綠色表示總體
-        axs[0].set_title('總獎勵')
-        axs[0].set_xlabel('輪數')
-        axs[0].set_ylabel('獎勵')
+        axs[0].set_title('total reward')
+        axs[0].set_xlabel('episode')
+        axs[0].set_ylabel('reward')
         axs[0].grid(True)
         
         # 繪製各機器人獎勵
@@ -440,38 +440,38 @@ class MultiRobotTrainer:
                     color='#8A2BE2', label='Robot1')  # 紫色
         axs[1].plot(episodes, self.training_history['robot2_rewards'], 
                     color='#FFA500', label='Robot2')  # 橘色
-        axs[1].set_title('各機器人獎勵')
-        axs[1].set_xlabel('輪數')
-        axs[1].set_ylabel('獎勵')
+        axs[1].set_title('reward per robot')
+        axs[1].set_xlabel('episode')
+        axs[1].set_ylabel('reward')
         axs[1].legend()
         axs[1].grid(True)
         
         # 繪製步數
         axs[2].plot(episodes, self.training_history['episode_lengths'], color='#4169E1')  # 藍色
-        axs[2].set_title('每輪步數')
-        axs[2].set_xlabel('輪數')
-        axs[2].set_ylabel('步數')
+        axs[2].set_title('step per episode')
+        axs[2].set_xlabel('episode')
+        axs[2].set_ylabel('step')
         axs[2].grid(True)
         
         # 繪製探索率
         axs[3].plot(episodes, self.training_history['exploration_rates'], color='#DC143C')  # 深紅色
-        axs[3].set_title('探索率')
-        axs[3].set_xlabel('輪數')
+        axs[3].set_title('epsilon rate')
+        axs[3].set_xlabel('episode')
         axs[3].set_ylabel('Epsilon')
         axs[3].grid(True)
         
         # 繪製損失
         axs[4].plot(episodes, self.training_history['losses'], color='#2F4F4F')  # 深灰色
-        axs[4].set_title('訓練損失')
-        axs[4].set_xlabel('輪數')
-        axs[4].set_ylabel('損失值')
+        axs[4].set_title('training loss')
+        axs[4].set_xlabel('episode')
+        axs[4].set_ylabel('loss')
         axs[4].grid(True)
         
         # 繪製探索進度
         axs[5].plot(episodes, self.training_history['exploration_progress'], color='#228B22')  # 森林綠
-        axs[5].set_title('探索進度')
-        axs[5].set_xlabel('輪數')
-        axs[5].set_ylabel('探索完成率')
+        axs[5].set_title('exploration progress')
+        axs[5].set_xlabel('episode')
+        axs[5].set_ylabel('exploration rate')
         axs[5].grid(True)
         
         plt.tight_layout()

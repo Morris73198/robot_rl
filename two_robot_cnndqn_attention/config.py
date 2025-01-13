@@ -50,7 +50,7 @@ ROBOT_CONFIG = {
 # 獎勵函數配置
 REWARD_CONFIG = {
     'exploration_weight': 2.0,       # 探索獎勵權重
-    'movement_penalty': -0.5,   # 移動懲罰
+    'movement_penalty': -1.5,   # 移動懲罰
     'collision_penalty': -0.0005,     # 碰撞懲罰
     # 'target_completion_reward': 5.0,  # 目標完成獎勵（已註釋）
     # 'completion_reward': 10.0        # 探索完成獎勵

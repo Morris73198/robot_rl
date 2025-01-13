@@ -206,7 +206,7 @@ def main():
     # latest_model = sorted(model_files)[-1]
     # model_path = os.path.join(MODEL_DIR, latest_model)
     
-    model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000020.h5')
+    model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000420.h5')
     
     if not os.path.exists(model_path):
         print(f"Error: Model file not found at {model_path}")

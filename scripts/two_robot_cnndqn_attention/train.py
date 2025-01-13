@@ -13,7 +13,8 @@ plt.ion()
 def main():
     try:
         # 指定模型路徑
-        model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000340.h5')
+        # model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000340.h5')
+        model_path = os.path.join(MODEL_DIR, 'xxx')
         
         # 創建模型
         print("正在創建模型...")
@@ -28,7 +29,7 @@ def main():
         if os.path.exists(model_path):
             print(f"正在載入模型: {model_path}")
             model.load(model_path)
-            start_episode = 340
+            start_episode = 0
             print(f"將從第 {start_episode} 輪繼續訓練")
         else:
             print(f"在 {model_path} 未找到模型檔案")
@@ -54,9 +55,9 @@ def main():
         )
         
         # 手動調整 epsilon 相關參數
-        trainer.epsilon = 0.1          # 設置當前的 epsilon 值 (探索率)
-        trainer.epsilon_min = 0.01     # 設置最小 epsilon 值
-        trainer.epsilon_decay = 0.9995 # 設置 epsilon 衰減率
+        trainer.epsilon = 1.0          # 設置當前的 epsilon 值 (探索率)
+        trainer.epsilon_min = 0.1     # 設置最小 epsilon 值
+        trainer.epsilon_decay = 0.9975 # 設置 epsilon 衰減率
         
         # 確保模型保存目錄存在
         if not os.path.exists(MODEL_DIR):

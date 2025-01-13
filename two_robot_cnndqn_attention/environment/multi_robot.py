@@ -18,11 +18,17 @@ class Robot:
     @classmethod
     def create_shared_robots(cls, index_map, train=True, plot=True):
         """創建共享環境的機器人實例"""
+        print("Creating robots with shared environment...")  # 調試信息
+
         # 創建第一個機器人，它會加載和初始化地圖
         robot1 = cls(index_map, train, plot, is_primary=True)
         
         # 創建第二個機器人，共享第一個機器人的地圖和相關資源
         robot2 = cls(index_map, train, plot, is_primary=False, shared_env=robot1)
+        
+        robot1.other_robot = robot2
+        print(f"Robot1 other_robot set: {robot1.other_robot is not None}")  # 調試信息
+        print(f"Robot2 shared_env set: {robot2.shared_env is not None}")    # 調試信息
         
         return robot1, robot2
     
@@ -368,7 +374,7 @@ class Robot:
             # 避免路徑重疊懲罰
             distance_to_other = np.linalg.norm(self.robot_position - self.other_robot_position)
             path_overlap_penalty = 0.0
-            if distance_to_other < ROBOT_CONFIG['robot_size'] * 2:
+            if distance_to_other < ROBOT_CONFIG['sensor_range'] * 2:
                 path_overlap_penalty = -0.1
             
             reward = self.calculate_fast_reward(old_op_map, self.op_map, move_vector) + path_overlap_penalty
@@ -383,82 +389,82 @@ class Robot:
         return self.get_observation(), reward, done
 
     def calculate_fast_reward(self, old_op_map, new_op_map, move_vector):
-        """計算改進的獎勵函數
+        # 添加調試信息
+        # print(f"Robot {1 if self.is_primary else 2} calculating reward")
+        # print(f"Has other_robot: {hasattr(self, 'other_robot')}")
+        # if hasattr(self, 'other_robot'):
+        #     print(f"other_robot is None: {self.other_robot is None}")
+        #     if self.other_robot is not None:
+        #         print(f"Has xPoint: {hasattr(self.other_robot, 'xPoint')}")
         
-        Args:
-            old_op_map: 更新前的地圖
-            new_op_map: 更新後的地圖
-            move_vector: 移動向量
-            
-        Returns:
-            float: 計算得到的獎勵值
-        """
-        # 1. 探索獎勵（基於新探索的面積）
+        # 1. 探索獎勵
         new_explored = np.sum(new_op_map == 255) - np.sum(old_op_map == 255)
         exploration_reward = new_explored / 14000.0 * REWARD_CONFIG['exploration_weight']
         
         # 2. 移動效率獎勵
         movement_length = np.linalg.norm(move_vector)
-        if new_explored > 0:
-            # 如果有新探索區域，獎勵更短的移動距離
-            # efficiency_reward = new_explored / (movement_length + 1.0) * 0.1
-            efficiency_reward = 0
-        else:
-            # 如果沒有新探索區域，懲罰移動
-            efficiency_reward = REWARD_CONFIG['movement_penalty'] * movement_length
+        efficiency_reward = (0 if new_explored > 0 
+                            else REWARD_CONFIG['movement_penalty'] * movement_length)
+
+        # 3. 檢查是否太接近另一個機器人的歷史路徑
+        other_path_penalty = 0
+        current_pos = np.array([self.robot_position[0], self.robot_position[1]])
         
-        # 3. 協同探索獎勵
+        # 獲取另一個機器人的參考（為 Robot1 和 Robot2 分別處理）
+        other_robot = None
+        if self.is_primary:
+            other_robot = self.other_robot
+            # print("Primary robot using other_robot reference")  # 調試信息
+        else:
+            other_robot = self.shared_env
+            # print("Secondary robot using shared_env reference")  # 調試信息
+        
+        # print(f"Other robot found: {other_robot is not None}")  # 調試信息
+        
+        if (other_robot is not None and 
+            hasattr(other_robot, 'xPoint') and 
+            hasattr(other_robot, 'yPoint') and 
+            len(other_robot.xPoint) > 0):
+            
+            recent_history = 50
+            start_idx = max(0, len(other_robot.xPoint) - recent_history)
+            
+            other_path = np.column_stack((
+                other_robot.xPoint[start_idx:],
+                other_robot.yPoint[start_idx:]
+            ))
+            
+            distances = np.linalg.norm(other_path - current_pos, axis=1)
+            min_distance = np.min(distances)
+            
+            # 根據距離計算懲罰
+            safe_distance = ROBOT_CONFIG['sensor_range'] * 1.5
+            if min_distance < safe_distance:
+                other_path_penalty = -2 * np.exp(-min_distance/safe_distance)
+            else:
+                other_path_penalty = 1 #reward
+                # print(f"Path penalty applied: {other_path_penalty}")  # 調試信息
+        
+        # 4. 協同探索獎勵
+        distance_reward = 0
         if self.other_robot_position is not None:
             distance_to_other = np.linalg.norm(self.robot_position - self.other_robot_position)
-            # 鼓勵保持適當距離（既不要太近也不要太遠）
             optimal_distance = self.sensor_range * 2
             distance_reward = -0.5 * abs(distance_to_other - optimal_distance) / optimal_distance
-        else:
-            distance_reward = 0
         
-        # # 4. 目標導向獎勵
-        # target_reward = 0
-        # if self.current_target_frontier is not None:
-        #     # 計算到目標的距離變化
-        #     old_distance = np.linalg.norm(
-        #         self.robot_position - move_vector - self.current_target_frontier)
-        #     new_distance = np.linalg.norm(
-        #         self.robot_position - self.current_target_frontier)
-            
-        #     # 如果距離減少，給予獎勵
-        #     if new_distance < old_distance:
-        #         target_reward = 0.1 * (old_distance - new_distance) / old_distance
-            
-        #     # 如果到達目標附近
-        #     if new_distance < ROBOT_CONFIG['target_reach_threshold']:
-        #         target_reward += 0.5
-        
-        # 5. 重複探索懲罰
-        overlap_penalty = 0
-        if self.other_robot_position is not None:
-            # 計算與其他機器人探索範圍的重疊
-            other_range = ROBOT_CONFIG['sensor_range']
-            overlap_dist = np.linalg.norm(self.robot_position - self.other_robot_position)
-            if overlap_dist < other_range:
-                overlap_penalty = -0.2 * (1 - overlap_dist/other_range)
-        
-        # # 6. 探索完成獎勵
-        # completion_reward = 0
-        # exploration_progress = np.sum(new_op_map == 255) / np.sum(self.global_map == 255)
-        # if exploration_progress > self.finish_percent:
-        #     completion_reward = 2.0
-        
-        # 組合所有獎勵
+        # 組合獎勵並添加日誌
         total_reward = (
             exploration_reward +
             efficiency_reward +
             distance_reward +
-            # target_reward +
-            overlap_penalty 
-            # completion_reward
+            other_path_penalty
         )
         
-        return np.clip(total_reward, -1, 1)
+        # print(f"Rewards breakdown - Exploration: {exploration_reward}, "
+        #     f"Efficiency: {efficiency_reward}, Distance: {distance_reward}, "
+        #     f"Path Penalty: {other_path_penalty}")  # 調試信息
+        
+        return total_reward
 
     def map_setup(self, location):
         """設置地圖和機器人初始位置"""
