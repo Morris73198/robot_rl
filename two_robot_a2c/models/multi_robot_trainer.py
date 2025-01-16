@@ -300,8 +300,8 @@ class MultiRobotACTrainer:
                 print(f"Steps: {steps}, Total Reward: {total_reward:.2f}")
                 print(f"Robot1 Reward: {robot1_total_reward:.2f}")
                 print(f"Robot2 Reward: {robot2_total_reward:.2f}")
-                print(f"Actor Loss: {actor_loss:.6f}")
-                print(f"Critic Loss: {critic_loss:.6f}")
+                print(f"Actor Loss: {float(actor_loss):.6f}")
+                print(f"Critic Loss: {float(critic_loss):.6f}")
                 print(f"Exploration Progress: {exploration_progress:.1%}")
                 
                 if exploration_progress >= self.robot1.finish_percent:

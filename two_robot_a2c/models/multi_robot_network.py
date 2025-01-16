@@ -188,8 +188,8 @@ class FeedForward(layers.Layer):
         ffn_output = self.dropout(ffn_output, training=training)
         ffn_output = self.layer_norm(x + ffn_output)
         return ffn_output
-
 class MultiRobotACModel:
+    """多機器人 Actor-Critic 模型"""
     def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
         self.input_shape = input_shape
         self.max_frontiers = max_frontiers
@@ -198,42 +198,107 @@ class MultiRobotACModel:
         self.dff = 512
         self.dropout_rate = 0.1
         
-        # 創建Actor和Critic網絡
+        # 創建 Actor 和 Critic 網絡
         self.actor = self._build_actor()
         self.critic = self._build_critic()
         
     def _build_perception_module(self, inputs):
         """構建共享的感知模塊"""
+        # 降低輸入分辨率
+        x = layers.AveragePooling2D(pool_size=(2, 2))(inputs)
+        
+        # 使用不同大小的卷積核進行特征提取
         conv_configs = [
-            {'filters': 32, 'kernel_size': 3, 'strides': 1},
-            {'filters': 32, 'kernel_size': 5, 'strides': 1},
-            {'filters': 32, 'kernel_size': 7, 'strides': 1}
+            {'filters': 32, 'kernel_size': 3, 'strides': 2},
+            {'filters': 32, 'kernel_size': 5, 'strides': 2},
+            {'filters': 32, 'kernel_size': 7, 'strides': 2}
         ]
         
         features = []
         for config in conv_configs:
-            x = layers.Conv2D(
+            branch = layers.Conv2D(
                 filters=config['filters'],
                 kernel_size=config['kernel_size'],
                 strides=config['strides'],
                 padding='same',
                 kernel_regularizer=regularizers.l2(0.01)
-            )(inputs)
-            x = layers.BatchNormalization()(x)
-            x = layers.Activation('relu')(x)
-            x = SpatialAttention()(x)
-            features.append(x)
+            )(x)
+            branch = layers.BatchNormalization()(branch)
+            branch = layers.Activation('relu')(branch)
+            branch = SpatialAttention()(branch)
+            features.append(branch)
             
-        concat_features = layers.Concatenate()(features)
-        x = layers.Conv2D(64, 1)(concat_features)
+        # 合併特征
+        x = layers.Add()(features)
+        x = layers.Conv2D(64, 1, padding='same')(x)
         x = layers.BatchNormalization()(x)
         x = layers.Activation('relu')(x)
-        x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+        x = layers.GlobalAveragePooling2D()(x)
         
         return x
         
+    def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
+        """構建共享特征提取層"""
+        # 處理 frontier 特征
+        frontier_features = layers.Dense(64, activation='relu')(frontier_input)
+        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
+        
+        # 添加位置編碼
+        pos_encoding = PositionalEncoding(self.max_frontiers, 64)(frontier_features)
+        
+        # 對 frontier 序列使用多頭注意力
+        attention_output = MultiHeadAttention(
+            d_model=64,
+            num_heads=4,
+            dropout_rate=self.dropout_rate
+        )([pos_encoding, pos_encoding, pos_encoding])
+        
+        frontier_features = layers.Add()([frontier_features, attention_output])
+        frontier_features = FeedForward(64, 128)(frontier_features)
+        
+        # 處理機器人狀態
+        robot_features = layers.Concatenate()([
+            layers.Dense(32, activation='relu')(robot1_state),
+            layers.Dense(32, activation='relu')(robot2_state)
+        ])
+        
+        # 合併所有特征
+        combined_features = layers.Concatenate()([
+            map_features,
+            layers.GlobalAveragePooling1D()(frontier_features),
+            robot_features
+        ])
+        
+        x = layers.Dense(256, activation='relu')(combined_features)
+        x = layers.Dropout(self.dropout_rate)(x)
+        x = layers.Dense(128, activation='relu')(x)
+        
+        return x
+        
+    def _build_policy_head(self, features, name_prefix):
+        """構建策略輸出頭"""
+        x = layers.Dense(128, activation='relu')(features)
+        x = layers.Dropout(self.dropout_rate)(x)
+        x = layers.Dense(64, activation='relu')(x)
+        x = layers.Dropout(self.dropout_rate)(x)
+        policy = layers.Dense(
+            self.max_frontiers,
+            activation='softmax',
+            name=name_prefix
+        )(x)
+        return policy
+
+    def _build_value_head(self, features, name_prefix):
+        """構建價值輸出頭"""
+        x = layers.Dense(128, activation='relu')(features)
+        x = layers.Dropout(self.dropout_rate)(x)
+        x = layers.Dense(64, activation='relu')(x)
+        x = layers.Dropout(self.dropout_rate)(x)
+        value = layers.Dense(1, name=name_prefix)(x)
+        return value
+        
     def _build_actor(self):
-        """構建Actor網絡"""
+        """構建 Actor 網絡"""
         # 輸入層
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
@@ -242,23 +307,22 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 地圖特徵提取
+        # 特征提取
         map_features = self._build_perception_module(map_input)
-        map_features_flat = layers.Flatten()(map_features)
         
         # 機器人狀態編碼
         robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
         robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
         
-        # 共享特徵提取
+        # 共享特征提取
         shared_features = self._build_shared_features(
-            map_features_flat, 
+            map_features, 
             frontier_input, 
             robot1_state, 
             robot2_state
         )
         
-        # Actor輸出層 - 為每個機器人輸出動作概率分布
+        # 輸出層
         robot1_policy = self._build_policy_head(shared_features, 'robot1_policy')
         robot2_policy = self._build_policy_head(shared_features, 'robot2_policy')
         
@@ -283,8 +347,7 @@ class MultiRobotACModel:
         return model
         
     def _build_critic(self):
-        """構建Critic網絡"""
-        # 使用與Actor相同的輸入層
+        """構建 Critic 網絡"""
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
         robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
@@ -292,21 +355,22 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 共享特徵提取
+        # 特征提取
         map_features = self._build_perception_module(map_input)
-        map_features_flat = layers.Flatten()(map_features)
         
+        # 機器人狀態編碼
         robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
         robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
         
+        # 共享特征提取
         shared_features = self._build_shared_features(
-            map_features_flat, 
+            map_features, 
             frontier_input, 
             robot1_state, 
             robot2_state
         )
         
-        # Critic輸出層 - 為每個機器人輸出狀態值
+        # 輸出層
         robot1_value = self._build_value_head(shared_features, 'robot1_value')
         robot2_value = self._build_value_head(shared_features, 'robot2_value')
         
@@ -329,51 +393,7 @@ class MultiRobotACModel:
         model.compile(optimizer=optimizer, loss='mse')
         
         return model
-        
-    def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
-        """構建共享特徵提取層"""
-        # 處理frontier特徵
-        frontier_features = layers.Dense(64, activation='relu')(frontier_input)
-        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
-        
-        # 處理機器人狀態
-        robot_features = layers.Concatenate()([
-            layers.Dense(32, activation='relu')(robot1_state),
-            layers.Dense(32, activation='relu')(robot2_state)
-        ])
-        
-        # 合併所有特徵
-        combined_features = layers.Concatenate()([
-            map_features,
-            layers.Flatten()(frontier_features),
-            robot_features
-        ])
-        
-        # 特徵融合
-        x = layers.Dense(512, activation='relu')(combined_features)
-        x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(256, activation='relu')(x)
-        
-        return x
-        
-    def _build_policy_head(self, features, name_prefix):
-        """構建策略輸出頭"""
-        x = layers.Dense(128, activation='relu')(features)
-        x = layers.Dropout(self.dropout_rate)(x)
-        policy = layers.Dense(
-            self.max_frontiers,
-            activation='softmax',
-            name=name_prefix
-        )(x)
-        return policy
-        
-    def _build_value_head(self, features, name_prefix):
-        """構建價值輸出頭"""
-        x = layers.Dense(128, activation='relu')(features)
-        x = layers.Dropout(self.dropout_rate)(x)
-        value = layers.Dense(1, name=name_prefix)(x)
-        return value
-    
+
     def predict_policy(self, state, frontiers, robot1_pos, robot2_pos, 
                       robot1_target, robot2_target):
         """預測動作概率分布"""
@@ -400,7 +420,7 @@ class MultiRobotACModel:
     
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
                    robot1_target, robot2_target, actions, advantages):
-        """訓練Actor網絡"""
+        """訓練 Actor 網絡"""
         with tf.GradientTape() as tape:
             # 獲取動作概率分布
             policy_dict = self.actor({
@@ -434,8 +454,8 @@ class MultiRobotACModel:
     
     def train_critic(self, states, frontiers, robot1_pos, robot2_pos,
                     robot1_target, robot2_target, returns):
-        """訓練Critic網絡"""
-        return self.critic.train_on_batch(
+        """訓練 Critic 網絡"""
+        loss = self.critic.train_on_batch(
             {
                 'map_input': states,
                 'frontier_input': frontiers,
@@ -449,14 +469,25 @@ class MultiRobotACModel:
                 'robot2_value': returns['robot2']
             }
         )
+        
+        # 處理損失值
+        if isinstance(loss, list):
+            # 如果是列表，取所有損失的平均值
+            return np.mean([float(l) for l in loss if not isinstance(l, list)])
+        elif isinstance(loss, dict):
+            # 如果是字典，取所有損失的平均值
+            return np.mean([float(v) for v in loss.values() if not isinstance(v, list)])
+        else:
+            # 如果是單個數值，直接返回
+            return float(loss)
     
     def _compute_policy_loss(self, policy, actions, advantages):
         """計算策略損失"""
-        # 將動作轉換為one-hot編碼
+        # 將動作轉換為 one-hot 編碼
         actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
         # 計算選中動作的對數概率
-        log_prob = tf.math.log(tf.reduce_sum(policy * actions_one_hot, axis=1))
+        log_prob = tf.math.log(tf.reduce_sum(policy * actions_one_hot, axis=1) + 1e-10)
         
         # 計算策略梯度損失
         policy_loss = -tf.reduce_mean(log_prob * advantages)
@@ -469,36 +500,109 @@ class MultiRobotACModel:
     
     def save(self, filepath):
         """保存模型"""
-        self.actor.save(filepath + '_actor')
-        self.critic.save(filepath + '_critic')
+        print("保存模型...")
         
-        config = {
-            'input_shape': self.input_shape,
-            'max_frontiers': self.max_frontiers,
-            'd_model': self.d_model,
-            'num_heads': self.num_heads,
-            'dff': self.dff,
-            'dropout_rate': self.dropout_rate
-        }
-        
-        with open(filepath + '_config.json', 'w') as f:
-            json.dump(config, f)
+        try:
+            # 保存 Actor
+            print(f"保存 actor 模型到: {filepath}_actor")
+            self.actor.save(filepath + '_actor', save_format='tf')
+            
+            # 保存 Critic
+            print(f"保存 critic 模型到: {filepath}_critic")
+            self.critic.save(filepath + '_critic', save_format='tf')
+            
+            # 保存配置
+            config = {
+                'input_shape': self.input_shape,
+                'max_frontiers': self.max_frontiers,
+                'd_model': self.d_model,
+                'num_heads': self.num_heads,
+                'dff': self.dff,
+                'dropout_rate': self.dropout_rate
+            }
+            
+            with open(filepath + '_config.json', 'w') as f:
+                json.dump(config, f, indent=4)
+                
+            print("模型保存成功")
+            return True
+            
+        except Exception as e:
+            print(f"保存模型時出錯: {str(e)}")
+            return False
     
     def load(self, filepath):
         """載入模型"""
-        custom_objects = {
-            'LayerNormalization': LayerNormalization,
-            'MultiHeadAttention': MultiHeadAttention,
-            'PositionalEncoding': PositionalEncoding,
-            'FeedForward': FeedForward,
-            'SpatialAttention': SpatialAttention
+        print("載入模型...")
+        
+        try:
+            # 載入配置
+            with open(filepath + '_config.json', 'r') as f:
+                config = json.load(f)
+                
+            # 更新模型配置
+            self.input_shape = tuple(config['input_shape'])
+            self.max_frontiers = config['max_frontiers']
+            self.d_model = config['d_model']
+            self.num_heads = config['num_heads']
+            self.dff = config['dff']
+            self.dropout_rate = config['dropout_rate']
+            
+# 定義自定義對象
+            custom_objects = {
+                'LayerNormalization': LayerNormalization,
+                'MultiHeadAttention': MultiHeadAttention,
+                'PositionalEncoding': PositionalEncoding,
+                'FeedForward': FeedForward,
+                'SpatialAttention': SpatialAttention
+            }
+            
+            # 載入模型
+            print(f"載入 actor 模型: {filepath}_actor")
+            self.actor = tf.keras.models.load_model(
+                filepath + '_actor',
+                custom_objects=custom_objects
+            )
+            
+            print(f"載入 critic 模型: {filepath}_critic")
+            self.critic = tf.keras.models.load_model(
+                filepath + '_critic',
+                custom_objects=custom_objects
+            )
+            
+            print("模型載入成功")
+            return True
+            
+        except Exception as e:
+            print(f"載入模型時出錯: {str(e)}")
+            return False
+
+    def verify_model(self):
+        """驗證模型"""
+        print("驗證模型...")
+        test_inputs = {
+            'map_input': np.zeros((1, *self.input_shape)),
+            'frontier_input': np.zeros((1, self.max_frontiers, 2)),
+            'robot1_pos_input': np.zeros((1, 2)),
+            'robot2_pos_input': np.zeros((1, 2)),
+            'robot1_target_input': np.zeros((1, 2)),
+            'robot2_target_input': np.zeros((1, 2))
         }
         
-        self.actor = models.load_model(
-            filepath + '_actor',
-            custom_objects=custom_objects
-        )
-        self.critic = models.load_model(
-            filepath + '_critic',
-            custom_objects=custom_objects
-        )
+        try:
+            # 測試前向傳播
+            actor_outputs = self.actor.predict(test_inputs, verbose=0)
+            critic_outputs = self.critic.predict(test_inputs, verbose=0)
+            
+            # 檢查輸出形狀
+            assert actor_outputs['robot1_policy'].shape == (1, self.max_frontiers)
+            assert actor_outputs['robot2_policy'].shape == (1, self.max_frontiers)
+            assert critic_outputs['robot1_value'].shape == (1, 1)
+            assert critic_outputs['robot2_value'].shape == (1, 1)
+            
+            print("模型驗證通過")
+            return True
+            
+        except Exception as e:
+            print(f"模型驗證失敗: {str(e)}")
+            return False
