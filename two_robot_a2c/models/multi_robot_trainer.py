@@ -28,6 +28,11 @@ class MultiRobotACTrainer:
             'exploration_progress': []
         }
         
+        # 添加收斂檢查相關的參數
+        self.convergence_window = 100  # 檢查最近100輪的數據
+        self.reward_threshold = 0.01   # 獎勵收斂閾值
+        self.loss_threshold = 0.001    # 損失收斂閾值
+        self.target_exploration_rate = 0.95  # 目標探索完成率
         # 經驗緩衝區用於儲存當前episode的軌跡
         self.reset_episode_buffer()
 
@@ -183,9 +188,93 @@ class MultiRobotACTrainer:
         )
         
         return actor_loss, critic_loss
+    
+    
+    
+    def check_reward_convergence(self):
+        """檢查獎勵是否收斂"""
+        if len(self.training_history['episode_rewards']) < self.convergence_window * 2:
+            return False
+            
+        recent_rewards = self.training_history['episode_rewards'][-self.convergence_window:]
+        previous_rewards = self.training_history['episode_rewards'][-2*self.convergence_window:-self.convergence_window]
+        
+        recent_mean = np.mean(recent_rewards)
+        previous_mean = np.mean(previous_rewards)
+        
+        is_converged = abs(recent_mean - previous_mean) < self.reward_threshold
+        
+        print(f"\nReward Convergence Check:")
+        print(f"Recent mean reward: {recent_mean:.3f}")
+        print(f"Previous mean reward: {previous_mean:.3f}")
+        print(f"Difference: {abs(recent_mean - previous_mean):.3f}")
+        print(f"Is converged: {is_converged}")
+        
+        return is_converged
+
+    def check_loss_convergence(self):
+        """檢查Actor和Critic損失是否收斂"""
+        if len(self.training_history['actor_losses']) < self.convergence_window:
+            return False
+            
+        recent_actor_losses = self.training_history['actor_losses'][-self.convergence_window:]
+        recent_critic_losses = self.training_history['critic_losses'][-self.convergence_window:]
+        
+        mean_actor_loss = np.mean(recent_actor_losses)
+        mean_critic_loss = np.mean(recent_critic_losses)
+        
+        is_converged = (mean_actor_loss < self.loss_threshold and 
+                       mean_critic_loss < self.loss_threshold)
+        
+        print(f"\nLoss Convergence Check:")
+        print(f"Mean actor loss: {mean_actor_loss:.6f}")
+        print(f"Mean critic loss: {mean_critic_loss:.6f}")
+        print(f"Is converged: {is_converged}")
+        
+        return is_converged
+
+    def check_exploration_performance(self):
+        """檢查探索性能是否達標"""
+        if len(self.training_history['exploration_progress']) < self.convergence_window:
+            return False
+            
+        recent_progress = self.training_history['exploration_progress'][-self.convergence_window:]
+        mean_progress = np.mean(recent_progress)
+        
+        is_achieved = mean_progress >= self.target_exploration_rate
+        
+        print(f"\nExploration Performance Check:")
+        print(f"Mean exploration progress: {mean_progress:.1%}")
+        print(f"Target progress: {self.target_exploration_rate:.1%}")
+        print(f"Is achieved: {is_achieved}")
+        
+        return is_achieved
+
+    def should_stop_training(self):
+        """綜合判斷是否應該停止訓練"""
+        reward_converged = self.check_reward_convergence()
+        loss_converged = self.check_loss_convergence()
+        exploration_achieved = self.check_exploration_performance()
+        
+        # 至少滿足兩個條件才停止訓練
+        conditions_met = sum([reward_converged, loss_converged, exploration_achieved])
+        should_stop = conditions_met >= 2
+        
+        print("\nTraining Stop Criteria:")
+        print(f"Conditions met: {conditions_met}/3")
+        print(f"Should stop: {should_stop}")
+        
+        return should_stop
+    
+    
 
     def train(self, episodes=1000000, save_freq=10):
-        """執行多機器人協同訓練"""
+        """執行多機器人協同訓練
+        
+        Args:
+            episodes (int): 訓練的總輪數
+            save_freq (int): 保存模型的頻率（每多少輪保存一次）
+        """
         try:
             for episode in range(episodes):
                 # 初始化環境
@@ -290,12 +379,18 @@ class MultiRobotACTrainer:
                 self.training_history['critic_losses'].append(critic_loss)
                 self.training_history['exploration_progress'].append(exploration_progress)
                 
-                # 定期保存模型
+                # 定期保存模型和檢查訓練狀態
                 if (episode + 1) % save_freq == 0:
                     self.save_checkpoint(episode + 1)
                     self.plot_training_progress()
+                    
+                    if episode > self.convergence_window * 2:
+                        print("\n" + "="*50)
+                        print(f"Checking training status at episode {episode + 1}")
+                        self.check_training_status()
+                        print("="*50)
                 
-                # 列印訓練信息
+                # 列印基本訓練信息
                 print(f"\nEpisode {episode + 1}/{episodes} (Map {self.robot1.li_map})")
                 print(f"Steps: {steps}, Total Reward: {total_reward:.2f}")
                 print(f"Robot1 Reward: {robot1_total_reward:.2f}")
@@ -308,6 +403,44 @@ class MultiRobotACTrainer:
                     print("Map Exploration Complete!")
                 else:
                     print("Map Exploration Incomplete")
+                
+                # 添加收斂監控信息（根據可用的歷史數據進行調整）
+                print("\nConvergence Monitoring:")
+                print("-" * 20)
+                
+                # 計算可用的歷史數據長度
+                available_history = len(self.training_history['episode_rewards'])
+                
+                if available_history > 0:
+                    # 獎勵統計
+                    print(f"Reward Statistics:")
+                    recent_rewards = self.training_history['episode_rewards'][-min(available_history, self.convergence_window):]
+                    current_mean_reward = np.mean(recent_rewards)
+                    print(f"- Current mean reward: {current_mean_reward:.3f}")
+                    
+                    if available_history > self.convergence_window:
+                        previous_rewards = self.training_history['episode_rewards'][-2*min(available_history//2, self.convergence_window):-min(available_history//2, self.convergence_window)]
+                        previous_mean_reward = np.mean(previous_rewards)
+                        reward_diff = abs(current_mean_reward - previous_mean_reward)
+                        print(f"- Previous mean reward: {previous_mean_reward:.3f}")
+                        print(f"- Reward change: {reward_diff:.3f}")
+                    
+                    # 損失統計
+                    print(f"\nLoss Statistics:")
+                    recent_actor_losses = self.training_history['actor_losses'][-min(available_history, self.convergence_window):]
+                    recent_critic_losses = self.training_history['critic_losses'][-min(available_history, self.convergence_window):]
+                    print(f"- Mean actor loss: {np.mean(recent_actor_losses):.6f}")
+                    print(f"- Mean critic loss: {np.mean(recent_critic_losses):.6f}")
+                    
+                    # 探索進度統計
+                    print(f"\nExploration Statistics:")
+                    recent_progress = self.training_history['exploration_progress'][-min(available_history, self.convergence_window):]
+                    mean_progress = np.mean(recent_progress)
+                    print(f"- Current progress: {mean_progress:.1%}")
+                    print(f"- Target: {self.target_exploration_rate:.1%}")
+                else:
+                    print("Insufficient history data for statistics")
+                
                 print("-" * 50)
                 
                 # 重置環境
@@ -328,7 +461,8 @@ class MultiRobotACTrainer:
                 self.robot1.cleanup_visualization()
             if hasattr(self.robot2, 'cleanup_visualization'):
                 self.robot2.cleanup_visualization()
-
+            
+            
     def plot_training_progress(self):
         """繪製訓練進度圖"""
         fig, axs = plt.subplots(7, 1, figsize=(12, 24))
