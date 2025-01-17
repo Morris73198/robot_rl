@@ -387,7 +387,7 @@ class MultiRobotACTrainer:
                     if episode > self.convergence_window * 2:
                         print("\n" + "="*50)
                         print(f"Checking training status at episode {episode + 1}")
-                        self.check_training_status()
+                        # self.check_training_status()
                         print("="*50)
                 
                 # 列印基本訓練信息
