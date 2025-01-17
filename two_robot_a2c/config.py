@@ -33,7 +33,7 @@ ROBOT_CONFIG = {
     'finish_percent': 0.995,         # 探索完成閾值
     
     # 移動優化配置
-    'movement_step': 5,              # 基本移動步長
+    'movement_step': 2,              # 基本移動步長
     'max_frontier_skip': 3,          # 每次跳過的路徑點數
     'path_simplification': 0.1,      # 路徑簡化閾值
     'min_frontier_dist': 30,         # 最小前沿點選擇距離
