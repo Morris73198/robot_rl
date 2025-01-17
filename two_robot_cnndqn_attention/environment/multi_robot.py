@@ -53,6 +53,14 @@ class Robot:
         self.shared_env = shared_env 
         
         
+        
+        # 初始化路徑追踪變量（無論是否繪圖都需要）
+        self.xPoint = np.array([])
+        self.yPoint = np.array([])
+        self.x2frontier = np.empty([0])
+        self.y2frontier = np.empty([0])
+        
+        
         self.lethal_cost = 100  # 致命障礙物代價
         self.decay_factor = 3  # 代價衰減因子
         self.inflation_radius = ROBOT_CONFIG['robot_size'] * 1.5  # 膨脹半徑為機器人尺寸的1.5倍
@@ -465,6 +473,8 @@ class Robot:
         #     f"Path Penalty: {other_path_penalty}")  # 調試信息
         
         return total_reward
+        # return np.clip(total_reward, -1, 1)
+
 
     def map_setup(self, location):
         """設置地圖和機器人初始位置"""
