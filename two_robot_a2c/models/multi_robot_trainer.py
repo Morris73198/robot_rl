@@ -115,32 +115,32 @@ class MultiRobotACTrainer:
         return robot1_action, robot2_action
 
     def compute_advantages(self, rewards, values, dones):
-        """計算GAE優勢值"""
+        # 不需要額外的next_value參數
+        returns = np.zeros_like(rewards)
         advantages = np.zeros_like(rewards)
         gae = 0
+        next_value = 0  # 對於episode結束時的處理
         
-        # 反向計算GAE
         for t in reversed(range(len(rewards))):
             if t == len(rewards) - 1:
-                next_value = 0
+                # 對於序列的最後一步
+                delta = rewards[t] - values[t]  # 因為是episode結束，所以不需要下一個value
             else:
-                next_value = values[t + 1]
-            
-            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - values[t]
+                # 對於序列中間的步驟
+                delta = rewards[t] + self.gamma * values[t + 1] * (1 - dones[t]) - values[t]
+                
             gae = delta + self.gamma * self.gae_lambda * (1 - dones[t]) * gae
             advantages[t] = gae
+            returns[t] = advantages[t] + values[t]
             
-        # 計算回報值
-        returns = advantages + values
-        
         # 標準化優勢值
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
+            
         return advantages, returns
 
+
     def train_on_episode(self):
-        """在收集的episode數據上進行訓練"""
-        # 將經驗數據轉換為numpy數組
+        # 獲取經驗數據
         states = np.array(self.current_episode['states'])
         frontiers = np.array(self.current_episode['frontiers'])
         robot1_pos = np.array(self.current_episode['robot1_pos'])

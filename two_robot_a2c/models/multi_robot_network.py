@@ -419,10 +419,9 @@ class MultiRobotACModel:
         }, verbose=0)
     
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
-                   robot1_target, robot2_target, actions, advantages):
-        """訓練 Actor 網絡"""
+                robot1_target, robot2_target, actions, advantages):
         with tf.GradientTape() as tape:
-            # 獲取動作概率分布
+            # 直接使用self.actor而不是self.model.actor
             policy_dict = self.actor({
                 'map_input': states,
                 'frontier_input': frontiers,
@@ -432,7 +431,6 @@ class MultiRobotACModel:
                 'robot2_target_input': robot2_target
             }, training=True)
             
-            # 計算策略梯度損失
             robot1_loss = self._compute_policy_loss(
                 policy_dict['robot1_policy'],
                 actions['robot1'],
@@ -446,50 +444,61 @@ class MultiRobotACModel:
             
             total_loss = robot1_loss + robot2_loss
             
-        # 應用梯度
+        # 應用梯度裁剪
         grads = tape.gradient(total_loss, self.actor.trainable_variables)
-        self.actor.optimizer.apply_gradients(zip(grads, self.actor.trainable_variables))
-        
+        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        self.actor.optimizer.apply_gradients(
+            zip(grads, self.actor.trainable_variables))
+            
         return total_loss
     
-    def train_critic(self, states, frontiers, robot1_pos, robot2_pos,
+    def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target, returns):
-        """訓練 Critic 網絡"""
-        loss = self.critic.train_on_batch(
-            {
+        with tf.GradientTape() as tape:
+            # 直接使用self.critic而不是self.model.critic
+            values = self.critic({
                 'map_input': states,
                 'frontier_input': frontiers,
                 'robot1_pos_input': robot1_pos,
                 'robot2_pos_input': robot2_pos,
                 'robot1_target_input': robot1_target,
                 'robot2_target_input': robot2_target
-            },
-            {
-                'robot1_value': returns['robot1'],
-                'robot2_value': returns['robot2']
-            }
-        )
-        
-        # 處理損失值
-        if isinstance(loss, list):
-            # 如果是列表，取所有損失的平均值
-            return np.mean([float(l) for l in loss if not isinstance(l, list)])
-        elif isinstance(loss, dict):
-            # 如果是字典，取所有損失的平均值
-            return np.mean([float(v) for v in loss.values() if not isinstance(v, list)])
-        else:
-            # 如果是單個數值，直接返回
-            return float(loss)
+            }, training=True)
+            
+            # 計算critic loss
+            robot1_value_loss = tf.keras.losses.Huber()(
+                returns['robot1'], values['robot1_value'])
+            robot2_value_loss = tf.keras.losses.Huber()(
+                returns['robot2'], values['robot2_value'])
+            
+            value_loss = robot1_value_loss + robot2_value_loss
+            
+        # 應用梯度裁剪
+        grads = tape.gradient(value_loss, self.critic.trainable_variables)
+        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        self.critic.optimizer.apply_gradients(
+            zip(grads, self.critic.trainable_variables))
+            
+        return value_loss
     
     def _compute_policy_loss(self, policy, actions, advantages):
-        """計算策略損失"""
+        """計算策略損失
+        
+        Args:
+            policy: 策略網絡輸出的動作概率分布
+            actions: 實際執行的動作
+            advantages: 計算出的優勢值
+        
+        Returns:
+            policy_loss: 策略損失值
+        """
         # 將動作轉換為 one-hot 編碼
         actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
-        # 計算選中動作的對數概率
+        # 計算所選動作的對數概率
         log_prob = tf.math.log(tf.reduce_sum(policy * actions_one_hot, axis=1) + 1e-10)
         
-        # 計算策略梯度損失
+        # 計算策略損失
         policy_loss = -tf.reduce_mean(log_prob * advantages)
         
         # 添加熵正則化以鼓勵探索
