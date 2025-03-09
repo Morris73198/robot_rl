@@ -1,5 +1,6 @@
 import os
 import sys
+import tensorflow as tf
 from two_robot_a2c_enhance.models.multi_robot_network import MultiRobotACModel
 from two_robot_a2c_enhance.models.multi_robot_trainer import MultiRobotACTrainer
 from two_robot_a2c_enhance.environment.multi_robot import Robot
@@ -12,6 +13,26 @@ plt.ion()
 
 def main():
     try:
+        # 設置GPU記憶體增長方式
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if gpus:
+            try:
+                # 允許GPU記憶體動態增長
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                print(f"已啟用GPU ({len(gpus)}個) 的記憶體動態增長")
+            except RuntimeError as e:
+                print(f"設置GPU記憶體增長時發生錯誤: {e}")
+        
+        # 啟用混合精度訓練以減少記憶體使用
+        # 註釋：如果模型仍然記憶體不足，可以取消這些註釋啟用混合精度訓練
+        # try:
+        #     policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        #     tf.keras.mixed_precision.set_global_policy(policy)
+        #     print("已啟用混合精度訓練 (float16)")
+        # except Exception as e:
+        #     print(f"設置混合精度訓練時發生錯誤: {e}")
+        
         # 指定模型路徑（actor和critic分開保存）
         model_path = os.path.join(MODEL_DIR, 'multi_robot_model_ac')
         
