@@ -18,11 +18,17 @@ class Robot:
     @classmethod
     def create_shared_robots(cls, index_map, train=True, plot=True):
         """創建共享環境的機器人實例"""
+        print("Creating robots with shared environment...")  # 調試信息
+
         # 創建第一個機器人，它會加載和初始化地圖
         robot1 = cls(index_map, train, plot, is_primary=True)
         
         # 創建第二個機器人，共享第一個機器人的地圖和相關資源
         robot2 = cls(index_map, train, plot, is_primary=False, shared_env=robot1)
+        
+        robot1.other_robot = robot2
+        print(f"Robot1 other_robot set: {robot1.other_robot is not None}")  # 調試信息
+        print(f"Robot2 shared_env set: {robot2.shared_env is not None}")    # 調試信息
         
         return robot1, robot2
     
@@ -171,21 +177,21 @@ class Robot:
         
         # 如果沒有當前路徑或需要重新規劃路徑
         if not hasattr(self, 'current_path') or self.current_path is None:
-            # 計算新路徑
-            path = self.astar_path(
+            # 檢查目標是否可達（是否已知區域可達路徑）
+            known_path = self.astar_path(
                 self.op_map,
                 self.robot_position.astype(np.int32),
                 target_frontier.astype(np.int32),
                 safety_distance=ROBOT_CONFIG['safety_distance']
             )
             
-            if path is None:
-                # 無法找到路徑，返回失敗
+            if known_path is None:
+                # 無法找到只經過已知區域的路徑
                 self.current_path = None
                 return self.get_observation(), -1, True
                 
             # 保存完整路徑
-            self.current_path = self.simplify_path(path, ROBOT_CONFIG['path_simplification'])
+            self.current_path = self.simplify_path(known_path, ROBOT_CONFIG['path_simplification'])
             self.current_path_index = 0
             
             # 立即更新可視化以顯示新規劃的路徑
@@ -239,9 +245,6 @@ class Robot:
         self.robot_position[0] = np.clip(self.robot_position[0], 0, self.map_size[1]-1)
         self.robot_position[1] = np.clip(self.robot_position[1], 0, self.map_size[0]-1)
         
-        # 打印移動信息（用於調試）
-        # print(f"Moving from {old_position} to {self.robot_position}, dist: {dist}")
-        
         # 碰撞檢查
         collision_points, collision_index = self.fast_collision_check(
             old_position, self.robot_position, self.map_size, self.global_map
@@ -266,7 +269,7 @@ class Robot:
         if dist <= ROBOT_CONFIG['movement_step']:
             self.current_path_index += 1
         
-        # 檢查地圖變化是否需要重新規劃路徑
+        # 檢查是否發現了新的障礙物，需要重新規劃路徑
         if self.should_replan_path(self.current_path[:, self.current_path_index:]):
             self.current_path = None
             return self.get_observation(), reward, True
@@ -368,7 +371,7 @@ class Robot:
             # 避免路徑重疊懲罰
             distance_to_other = np.linalg.norm(self.robot_position - self.other_robot_position)
             path_overlap_penalty = 0.0
-            if distance_to_other < ROBOT_CONFIG['robot_size'] * 2:
+            if distance_to_other < ROBOT_CONFIG['sensor_range'] * 2:
                 path_overlap_penalty = -0.1
             
             reward = self.calculate_fast_reward(old_op_map, self.op_map, move_vector) + path_overlap_penalty
@@ -383,25 +386,84 @@ class Robot:
         return self.get_observation(), reward, done
 
     def calculate_fast_reward(self, old_op_map, new_op_map, move_vector):
-        """計算獎勵"""
-        # 探索獎勵
-        explored_diff = float(
-            np.sum(new_op_map == 255) - np.sum(old_op_map == 255)
-        ) / 14000 * REWARD_CONFIG['exploration_weight']
+        # 添加調試信息
+        # print(f"Robot {1 if self.is_primary else 2} calculating reward")
+        # print(f"Has other_robot: {hasattr(self, 'other_robot')}")
+        # if hasattr(self, 'other_robot'):
+        #     print(f"other_robot is None: {self.other_robot is None}")
+        #     if self.other_robot is not None:
+        #         print(f"Has xPoint: {hasattr(self.other_robot, 'xPoint')}")
         
-        # 移動懲罰
-        movement_cost = REWARD_CONFIG['movement_penalty'] * np.linalg.norm(move_vector)
+        # 1. 探索獎勵
+        new_explored = np.sum(new_op_map == 255) - np.sum(old_op_map == 255)
+        exploration_reward = new_explored / 14000.0 * REWARD_CONFIG['exploration_weight']
         
-        # 離目標點越近獎勵越高（之後可能會拿掉）
-        if self.current_target_frontier is not None:
-            distance_to_target = np.linalg.norm(
-                self.current_target_frontier - self.robot_position)
-            progress_reward = -0.0001 * distance_to_target
+        # 2. 移動效率獎勵
+        movement_length = np.linalg.norm(move_vector)
+        efficiency_reward = (0 if new_explored > 0 
+                            else REWARD_CONFIG['movement_penalty'] * movement_length)
+
+        # 3. 檢查是否太接近另一個機器人的歷史路徑
+        other_path_penalty = 0
+        current_pos = np.array([self.robot_position[0], self.robot_position[1]])
+        
+        # 獲取另一個機器人的參考（為 Robot1 和 Robot2 分別處理）
+        other_robot = None
+        if self.is_primary:
+            other_robot = self.other_robot
+            # print("Primary robot using other_robot reference")  # 調試信息
         else:
-            progress_reward = 0
+            other_robot = self.shared_env
+            # print("Secondary robot using shared_env reference")  # 調試信息
         
-        total_reward = explored_diff + movement_cost + progress_reward
-        return np.clip(total_reward, -1, 1)
+        # print(f"Other robot found: {other_robot is not None}")  # 調試信息
+        
+        if (other_robot is not None and 
+            hasattr(other_robot, 'xPoint') and 
+            hasattr(other_robot, 'yPoint') and 
+            len(other_robot.xPoint) > 0):
+            
+            recent_history = 50
+            start_idx = max(0, len(other_robot.xPoint) - recent_history)
+            
+            other_path = np.column_stack((
+                other_robot.xPoint[start_idx:],
+                other_robot.yPoint[start_idx:]
+            ))
+            
+            distances = np.linalg.norm(other_path - current_pos, axis=1)
+            min_distance = np.min(distances)
+            
+            # 根據距離計算懲罰
+            safe_distance = ROBOT_CONFIG['sensor_range'] * 1.5
+            if min_distance < safe_distance:
+                other_path_penalty = -2 * np.exp(-min_distance/safe_distance)
+            else:
+                other_path_penalty = 1 #reward
+                # print(f"Path penalty applied: {other_path_penalty}")  # 調試信息
+        
+        # 4. 協同探索獎勵
+        distance_reward = 0
+        if self.other_robot_position is not None:
+            distance_to_other = np.linalg.norm(self.robot_position - self.other_robot_position)
+            optimal_distance = self.sensor_range * 2
+            distance_reward = -0.5 * abs(distance_to_other - optimal_distance) / optimal_distance
+        
+        # 組合獎勵並添加日誌
+        total_reward = (
+            exploration_reward +
+            efficiency_reward +
+            distance_reward +
+            other_path_penalty
+        )
+        
+        # print(f"Rewards breakdown - Exploration: {exploration_reward}, "
+        #     f"Efficiency: {efficiency_reward}, Distance: {distance_reward}, "
+        #     f"Path Penalty: {other_path_penalty}")  # 調試信息
+        
+        return total_reward
+        # return np.clip(total_reward, -1, 1)
+
 
     def map_setup(self, location):
         """設置地圖和機器人初始位置"""
@@ -640,7 +702,6 @@ class Robot:
                 if remaining_path.shape[1] > 1:
                     plt.plot(remaining_path[0, 1], remaining_path[1, 1], 'x', 
                             color=path_color, markersize=8, label='Next Point')
-                
                 plt.plot(remaining_path[0, -1], remaining_path[1, -1], 's',
                          color=path_color, markersize=10, label='Goal')
         
@@ -789,7 +850,7 @@ class Robot:
         return cost_map
 
     def astar_with_inflation(self, start, goal, op_map):
-        """考慮膨脹的A*路徑規劃
+        """考慮膨脹的A*路徑規劃，只走已知區域
         
         Args:
             start: 起點 (x, y)
@@ -799,8 +860,14 @@ class Robot:
         Returns:
             path: 路徑點列表，如果沒找到則返回None
         """
-        # 創建二值地圖
-        binary_map = (op_map == 1).astype(int)
+        # 創建二值地圖 - 注意：現在我們只考慮已知區域（值為255）作為可行走區域
+        binary_map = np.zeros_like(op_map, dtype=int)
+        
+        # 設置障礙物為1（op_map中值為1的點）
+        binary_map[op_map == 1] = 1
+        
+        # 設置未知區域為1（op_map中值為127的點）- 將未知區域視為障礙物
+        binary_map[op_map == 127] = 1
         
         # 獲取膨脹後的代價地圖
         cost_map = self.inflate_map(binary_map)
@@ -831,6 +898,10 @@ class Robot:
                 return np.array(path).T
                 
             for next_pos in self.get_neighbors(current, cost_map):
+                # 確保只走已知區域
+                if op_map[next_pos[1], next_pos[0]] != 255:
+                    continue
+                    
                 # 計算新代價，包括膨脹代價
                 movement_cost = 1.0
                 if abs(next_pos[0] - current[0]) + abs(next_pos[1] - current[1]) == 2:
@@ -853,19 +924,19 @@ class Robot:
 
     def get_neighbors(self, pos, cost_map):
         """
-        获取当前位置的有效邻居节点
+        獲取當前位置的有效鄰居節點，只考慮已知區域
         
         Args:
-            pos: 当前位置 (x, y)
-            cost_map: 包含障碍物和膨胀区域的代价地图
+            pos: 當前位置 (x, y)
+            cost_map: 包含障礙物和膨脹區域的代價地圖
             
         Returns:
-            neighbors: 有效的邻居位置列表
+            neighbors: 有效的鄰居位置列表
         """
         x, y = pos
         neighbors = []
         
-        # 8个方向的邻居：上下左右和对角线
+        # 8個方向的鄰居：上下左右和對角線
         directions = [
             (0, 1),   # 右
             (1, 0),   # 下
@@ -880,12 +951,12 @@ class Robot:
         for dx, dy in directions:
             new_x, new_y = x + dx, y + dy
             
-            # 检查边界
+            # 檢查邊界
             if not (0 <= new_x < self.map_size[1] and 0 <= new_y < self.map_size[0]):
                 continue
                 
-            # 检查是否在安全区域（代价小于致命代价）
-            if cost_map[new_y, new_x] < self.lethal_cost:
+            # 檢查是否在安全區域（代價小於致命代價）並且是已知區域
+            if cost_map[new_y, new_x] < self.lethal_cost and self.op_map[new_y, new_x] == 255:
                 neighbors.append((new_x, new_y))
                 
         return neighbors
@@ -907,7 +978,7 @@ class Robot:
 
 
     def astar(self, op_map, start, goal):
-        """A*路径规划"""
+        """A*路徑規劃，只走已知區域"""
         start = tuple(start)
         goal = tuple(goal)
         
@@ -936,16 +1007,20 @@ class Robot:
             for dx, dy in neighbors:
                 neighbor = (current[0] + dx, current[1] + dy)
                 
-                # 边界检查
+                # 邊界檢查
                 if not (0 <= neighbor[0] < self.map_size[1] and 
-                       0 <= neighbor[1] < self.map_size[0]):
+                    0 <= neighbor[1] < self.map_size[0]):
                     continue
                     
-                # 障碍物检查
+                # 障礙物檢查
                 if op_map[neighbor[1]][neighbor[0]] == 1:
                     continue
+                    
+                # 只走已知區域（op_map值為255的區域）
+                if op_map[neighbor[1]][neighbor[0]] != 255:
+                    continue
                 
-                # 移动代价计算，对角线移动代价更高
+                # 移動代價計算，對角線移動代價更高
                 move_cost = ROBOT_CONFIG['diagonal_weight'] if dx != 0 and dy != 0 else 1
                 tentative_g_score = gscore[current] + move_cost
                 
@@ -961,7 +1036,7 @@ class Robot:
         return None
 
     def heuristic(self, a, b):
-        """启发式函数：使用对角线距离"""
+        
         dx = abs(a[0] - b[0])
         dy = abs(a[1] - b[1])
         D = 1  # 直线移动代价

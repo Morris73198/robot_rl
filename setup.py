@@ -12,21 +12,42 @@ class get_pybind_include(object):
         import pybind11
         return pybind11.get_include(self.user)
 
+# Find where conda installed Eigen
+conda_prefix = os.environ.get('CONDA_PREFIX', os.path.abspath(os.path.join(os.path.dirname(__file__), 'env3.6')))
+eigen_include_dirs = [
+    os.path.join(conda_prefix, 'Library', 'include', 'eigen3'),  # Windows conda path
+    os.path.join(conda_prefix, 'include', 'eigen3'),             # Alternative location
+    "/usr/include/eigen3"                                        # Original Unix path
+]
+
 ext_modules = [
     Extension(
         "one_robot_cnndqn.utils.inverse_sensor_model",
         ["one_robot_cnndqn/utils/inverse_sensor_model.cpp"],
+        
         include_dirs=[
             get_pybind_include(),
             get_pybind_include(user=True),
-            "/usr/include/eigen3"  # 添加 Eigen 
+            *eigen_include_dirs  # Use our enhanced list of Eigen paths
         ],
         language='c++'
     ),
-    
+
+
+    Extension(
+        "two_robot_dueling_dqn_attention.utils.inverse_sensor_model",
+        ["two_robot_dueling_dqn_attention/utils/inverse_sensor_model.cpp"],
+        include_dirs=[
+            get_pybind_include(),
+            get_pybind_include(user=True),
+            *eigen_include_dirs
+        ],
+        define_macros=[('_USE_MATH_DEFINES', None)],
+        language='c++'
+    ),
 ]
 
-# 添加 C++11
+# C++11 compiler settings
 class BuildExt(build_ext):
     def build_extensions(self):
         ct = self.compiler.compiler_type
@@ -34,6 +55,9 @@ class BuildExt(build_ext):
         if ct == 'unix':
             opts.append('-std=c++11')
             opts.append('-O3')
+        elif ct == 'msvc':  # Add MSVC-specific options
+            opts.append('/EHsc')
+            opts.append('/O2')
         for ext in self.extensions:
             ext.extra_compile_args = opts
         build_ext.build_extensions(self)
