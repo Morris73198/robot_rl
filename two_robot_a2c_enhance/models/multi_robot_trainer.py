@@ -83,8 +83,8 @@ class MultiRobotACTrainer:
         return normalized
 
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos,
-                  robot1_target, robot2_target):
-        """根據當前策略選擇動作 - 修復NaN問題"""
+                      robot1_target, robot2_target):
+        """根據當前策略選擇動作"""
         if len(frontiers) == 0:
             return 0, 0
 
@@ -105,36 +105,12 @@ class MultiRobotACTrainer:
 
         valid_frontiers = min(self.model.max_frontiers, len(frontiers))
         
-        # 從概率分布中採樣動作 - 使用安全版本處理NaN
+        # 從概率分布中採樣動作
         robot1_probs = policy_dict['robot1_policy'][0, :valid_frontiers]
         robot2_probs = policy_dict['robot2_policy'][0, :valid_frontiers]
         
-        # 檢查並修復NaN值
-        if np.any(np.isnan(robot1_probs)):
-            print("Warning: NaN detected in robot1 probabilities, using uniform distribution")
-            robot1_probs = np.ones(valid_frontiers) / valid_frontiers
-        else:
-            # 確保總和為1
-            robot1_sum = np.sum(robot1_probs)
-            if robot1_sum <= 0 or np.isnan(robot1_sum):
-                robot1_probs = np.ones(valid_frontiers) / valid_frontiers
-            else:
-                robot1_probs = robot1_probs / robot1_sum
-        
-        if np.any(np.isnan(robot2_probs)):
-            print("Warning: NaN detected in robot2 probabilities, using uniform distribution")
-            robot2_probs = np.ones(valid_frontiers) / valid_frontiers
-        else:
-            # 確保總和為1
-            robot2_sum = np.sum(robot2_probs)
-            if robot2_sum <= 0 or np.isnan(robot2_sum):
-                robot2_probs = np.ones(valid_frontiers) / valid_frontiers
-            else:
-                robot2_probs = robot2_probs / robot2_sum
-        
-        # 安全採樣
-        robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-        robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
+        robot1_action = np.random.choice(valid_frontiers, p=robot1_probs/np.sum(robot1_probs))
+        robot2_action = np.random.choice(valid_frontiers, p=robot2_probs/np.sum(robot2_probs))
 
         return robot1_action, robot2_action
 
@@ -292,13 +268,12 @@ class MultiRobotACTrainer:
     
     
 
-    def train(self, episodes=1000000, save_freq=10, accumulation_steps=4):
-        """執行多機器人協同訓練 - 記憶體優化版
+    def train(self, episodes=1000000, save_freq=10):
+        """執行多機器人協同訓練
         
         Args:
             episodes (int): 訓練的總輪數
             save_freq (int): 保存模型的頻率（每多少輪保存一次）
-            accumulation_steps (int): 梯度累積步數，用於降低記憶體使用
         """
         try:
             for episode in range(episodes):
@@ -315,9 +290,7 @@ class MultiRobotACTrainer:
                 robot2_total_reward = 0
                 steps = 0
                 
-                # 主訓練循環
                 while not (self.robot1.check_done() or self.robot2.check_done()):
-                    # 將長序列分成小批次處理，減少記憶體使用
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
@@ -337,7 +310,7 @@ class MultiRobotACTrainer:
                         robot1_target, robot2_target
                     )
                     
-                    # 獲取當前狀態的價值估計 - 批次大小1，減少記憶體使用
+                    # 獲取當前狀態的價值估計
                     values = self.model.predict_value(
                         np.expand_dims(state, 0),
                         np.expand_dims(self.pad_frontiers(frontiers), 0),
@@ -386,28 +359,15 @@ class MultiRobotACTrainer:
                     robot2_total_reward += r2
                     steps += 1
                     
-                    # 主動釋放不需要的大型變量的記憶體
-                    if hasattr(tf, 'keras'):
-                        tf.keras.backend.clear_session()
-                    
-                    # 定期清理 GPU 快取 (每100步)
-                    if steps % 100 == 0 and hasattr(tf, 'config'):
-                        try:
-                            for gpu in tf.config.experimental.list_physical_devices('GPU'):
-                                tf.config.experimental.reset_memory_stats(gpu)
-                        except:
-                            pass
-                    
-                    # 更新可視化 (減少更新頻率)
-                    if steps % (ROBOT_CONFIG['plot_interval'] * 2) == 0:
+                    # 更新可視化
+                    if steps % ROBOT_CONFIG['plot_interval'] == 0:
                         if self.robot1.plot:
                             self.robot1.plot_env()
                         if self.robot2.plot:
                             self.robot2.plot_env()
                 
-                # Episode結束，進行訓練 - 使用梯度累積優化記憶體使用
-                if len(self.current_episode['states']) > 0:
-                    self.train_on_episode_with_accumulation(accumulation_steps)
+                # Episode結束，進行訓練
+                actor_loss, critic_loss = self.train_on_episode()
                 
                 # 更新訓練歷史
                 exploration_progress = self.robot1.get_exploration_progress()
@@ -415,35 +375,73 @@ class MultiRobotACTrainer:
                 self.training_history['robot1_rewards'].append(robot1_total_reward)
                 self.training_history['robot2_rewards'].append(robot2_total_reward)
                 self.training_history['episode_lengths'].append(steps)
+                self.training_history['actor_losses'].append(actor_loss)
+                self.training_history['critic_losses'].append(critic_loss)
                 self.training_history['exploration_progress'].append(exploration_progress)
                 
-                # 定期保存模型和檢查訓練狀態 (減少檢查頻率)
+                # 定期保存模型和檢查訓練狀態
                 if (episode + 1) % save_freq == 0:
                     self.save_checkpoint(episode + 1)
+                    self.plot_training_progress()
                     
-                    # 每5個保存周期才做一次繪圖，減少IO操作
-                    if (episode + 1) % (save_freq * 5) == 0:
-                        self.plot_training_progress()
-                    
-                    # 每10個保存周期才檢查一次收斂性，減少計算開銷
-                    if episode > self.convergence_window * 2 and (episode + 1) % (save_freq * 10) == 0:
+                    if episode > self.convergence_window * 2:
                         print("\n" + "="*50)
                         print(f"Checking training status at episode {episode + 1}")
-                        if self.should_stop_training():
-                            print("Training converged. Stopping.")
-                            break
+                        self.check_training_status()
                         print("="*50)
                 
-                # 列印基本訓練信息 - 簡化輸出
+                # 列印基本訓練信息
                 print(f"\nEpisode {episode + 1}/{episodes} (Map {self.robot1.li_map})")
-                print(f"Steps: {steps}, Total Reward: {total_reward:.2f}, Exploration: {exploration_progress:.1%}")
+                print(f"Steps: {steps}, Total Reward: {total_reward:.2f}")
+                print(f"Robot1 Reward: {robot1_total_reward:.2f}")
+                print(f"Robot2 Reward: {robot2_total_reward:.2f}")
+                print(f"Actor Loss: {float(actor_loss):.6f}")
+                print(f"Critic Loss: {float(critic_loss):.6f}")
+                print(f"Exploration Progress: {exploration_progress:.1%}")
                 
-                # 主動進行垃圾回收
-                try:
-                    import gc
-                    gc.collect()
-                except:
-                    pass
+                if exploration_progress >= self.robot1.finish_percent:
+                    print("Map Exploration Complete!")
+                else:
+                    print("Map Exploration Incomplete")
+                
+                # 添加收斂監控信息（根據可用的歷史數據進行調整）
+                print("\nConvergence Monitoring:")
+                print("-" * 20)
+                
+                # 計算可用的歷史數據長度
+                available_history = len(self.training_history['episode_rewards'])
+                
+                if available_history > 0:
+                    # 獎勵統計
+                    print(f"Reward Statistics:")
+                    recent_rewards = self.training_history['episode_rewards'][-min(available_history, self.convergence_window):]
+                    current_mean_reward = np.mean(recent_rewards)
+                    print(f"- Current mean reward: {current_mean_reward:.3f}")
+                    
+                    if available_history > self.convergence_window:
+                        previous_rewards = self.training_history['episode_rewards'][-2*min(available_history//2, self.convergence_window):-min(available_history//2, self.convergence_window)]
+                        previous_mean_reward = np.mean(previous_rewards)
+                        reward_diff = abs(current_mean_reward - previous_mean_reward)
+                        print(f"- Previous mean reward: {previous_mean_reward:.3f}")
+                        print(f"- Reward change: {reward_diff:.3f}")
+                    
+                    # 損失統計
+                    print(f"\nLoss Statistics:")
+                    recent_actor_losses = self.training_history['actor_losses'][-min(available_history, self.convergence_window):]
+                    recent_critic_losses = self.training_history['critic_losses'][-min(available_history, self.convergence_window):]
+                    print(f"- Mean actor loss: {np.mean(recent_actor_losses):.6f}")
+                    print(f"- Mean critic loss: {np.mean(recent_critic_losses):.6f}")
+                    
+                    # 探索進度統計
+                    print(f"\nExploration Statistics:")
+                    recent_progress = self.training_history['exploration_progress'][-min(available_history, self.convergence_window):]
+                    mean_progress = np.mean(recent_progress)
+                    print(f"- Current progress: {mean_progress:.1%}")
+                    print(f"- Target: {self.target_exploration_rate:.1%}")
+                else:
+                    print("Insufficient history data for statistics")
+                
+                print("-" * 50)
                 
                 # 重置環境
                 state = self.robot1.reset()
@@ -463,99 +461,6 @@ class MultiRobotACTrainer:
                 self.robot1.cleanup_visualization()
             if hasattr(self.robot2, 'cleanup_visualization'):
                 self.robot2.cleanup_visualization()
-
-
-
-
-
-
-    def train_on_episode_with_accumulation(self, accumulation_steps=4):
-        """使用梯度累積訓練，減少記憶體使用"""
-        # 數據分批處理，確保每批數據量較小
-        n_data = len(self.current_episode['states'])
-        batch_size = max(1, n_data // accumulation_steps)
-        
-        # 初始化累積梯度
-        actor_loss_total = 0
-        critic_loss_total = 0
-        
-        for i in range(0, n_data, batch_size):
-            # 計算此批次的結束索引
-            end_idx = min(i + batch_size, n_data)
-            batch_indices = slice(i, end_idx)
-            
-            # 準備批次數據
-            states = np.array(self.current_episode['states'][batch_indices])
-            frontiers = np.array(self.current_episode['frontiers'][batch_indices])
-            robot1_pos = np.array(self.current_episode['robot1_pos'][batch_indices])
-            robot2_pos = np.array(self.current_episode['robot2_pos'][batch_indices])
-            robot1_target = np.array(self.current_episode['robot1_target'][batch_indices])
-            robot2_target = np.array(self.current_episode['robot2_target'][batch_indices])
-            
-            robot1_values = np.array(self.current_episode['robot1_values'][batch_indices])
-            robot2_values = np.array(self.current_episode['robot2_values'][batch_indices])
-            robot1_rewards = np.array(self.current_episode['robot1_rewards'][batch_indices])
-            robot2_rewards = np.array(self.current_episode['robot2_rewards'][batch_indices])
-            robot1_dones = np.array(self.current_episode['robot1_dones'][batch_indices])
-            robot2_dones = np.array(self.current_episode['robot2_dones'][batch_indices])
-            robot1_actions = np.array(self.current_episode['robot1_actions'][batch_indices])
-            robot2_actions = np.array(self.current_episode['robot2_actions'][batch_indices])
-            
-            # 計算優勢和回報
-            robot1_advantages, robot1_returns = self.compute_advantages(
-                robot1_rewards, robot1_values, robot1_dones)
-            robot2_advantages, robot2_returns = self.compute_advantages(
-                robot2_rewards, robot2_values, robot2_dones)
-            
-            # 訓練 Critic
-            critic_loss = self.model.train_critic(
-                states, frontiers,
-                robot1_pos, robot2_pos,
-                robot1_target, robot2_target,
-                {
-                    'robot1': robot1_returns,
-                    'robot2': robot2_returns
-                }
-            )
-            
-            # 訓練 Actor
-            actor_loss = self.model.train_actor(
-                states, frontiers,
-                robot1_pos, robot2_pos,
-                robot1_target, robot2_target,
-                {
-                    'robot1': robot1_actions,
-                    'robot2': robot2_actions
-                },
-                {
-                    'robot1': robot1_advantages,
-                    'robot2': robot2_advantages
-                }
-            )
-            
-            # 累積損失
-            actor_loss_total += actor_loss
-            critic_loss_total += critic_loss
-            
-            # 清理記憶體
-            del states, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target
-            del robot1_values, robot2_values, robot1_rewards, robot2_rewards
-            del robot1_dones, robot2_dones, robot1_actions, robot2_actions
-            del robot1_advantages, robot1_returns, robot2_advantages, robot2_returns
-            
-            # 主動釋放 TensorFlow 的內部緩存
-            if hasattr(tf, 'keras'):
-                tf.keras.backend.clear_session()
-        
-        # 計算平均損失
-        actor_loss_avg = actor_loss_total / accumulation_steps
-        critic_loss_avg = critic_loss_total / accumulation_steps
-        
-        # 更新損失歷史
-        self.training_history['actor_losses'].append(float(actor_loss_avg))
-        self.training_history['critic_losses'].append(float(critic_loss_avg))
-        
-        return actor_loss_avg, critic_loss_avg
             
             
     def plot_training_progress(self):
