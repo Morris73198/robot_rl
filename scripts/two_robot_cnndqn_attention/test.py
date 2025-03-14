@@ -1,4 +1,6 @@
 import os
+# import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1" # 禁用 GPU
 import sys
 import numpy as np
 import matplotlib
