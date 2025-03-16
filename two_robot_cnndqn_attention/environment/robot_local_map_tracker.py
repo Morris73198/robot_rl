@@ -429,3 +429,93 @@ class RobotIndividualMapTracker:
         self.robot1_individual_map = None
         self.robot2_individual_map = None
         self.is_tracking = False
+
+
+    def plot_coverage_over_time(self):
+        """
+        繪製覆蓋率隨時間變化的圖表，包括：
+        - Robot1 的覆蓋率
+        - Robot2 的覆蓋率
+        - 兩個機器人探索區域的交集
+        - 兩個機器人探索區域的聯集
+        """
+        if not self.robot1_maps or not self.robot2_maps:
+            print("沒有記錄的地圖歷史，無法生成圖表")
+            return
+        
+        # 計算每個時間點的覆蓋率指標
+        time_steps = range(len(self.robot1_maps))
+        robot1_coverage = []
+        robot2_coverage = []
+        intersection_coverage = []
+        union_coverage = []
+        
+        # 計算全局地圖的可探索區域總數
+        total_explorable = np.sum(self.robot1.global_map == 255)
+        
+        for i in time_steps:
+            # 獲取每個時間點的地圖
+            robot1_map = self.robot1_maps[i]
+            robot2_map = self.robot2_maps[i]
+            
+            # 計算已探索區域（值為255的區域）
+            robot1_explored = (robot1_map == 255)
+            robot2_explored = (robot2_map == 255)
+            
+            # 計算交集（兩個機器人都探索的區域）
+            intersection = np.logical_and(robot1_explored, robot2_explored)
+            
+            # 計算聯集（至少一個機器人探索的區域）
+            union = np.logical_or(robot1_explored, robot2_explored)
+            
+            # 計算覆蓋率
+            robot1_ratio = np.sum(robot1_explored) / total_explorable if total_explorable > 0 else 0
+            robot2_ratio = np.sum(robot2_explored) / total_explorable if total_explorable > 0 else 0
+            intersection_ratio = np.sum(intersection) / total_explorable if total_explorable > 0 else 0
+            union_ratio = np.sum(union) / total_explorable if total_explorable > 0 else 0
+            
+            # 保存數據
+            robot1_coverage.append(robot1_ratio)
+            robot2_coverage.append(robot2_ratio)
+            intersection_coverage.append(intersection_ratio)
+            union_coverage.append(union_ratio)
+        
+        # 創建圖表
+        plt.figure(figsize=(12, 8))
+        
+        # 繪製各條曲線
+        plt.plot(time_steps, robot1_coverage, 'b-', linewidth=2, label='Robot 1')
+        plt.plot(time_steps, robot2_coverage, 'r-', linewidth=2, label='Robot 2')
+        plt.plot(time_steps, intersection_coverage, 'g-', linewidth=2, label='intersection')
+        plt.plot(time_steps, union_coverage, 'k-', linewidth=2, label='union')
+        
+        # 添加標籤和標題
+        plt.xlabel('time(steps)', fontsize=14)
+        plt.ylabel('coverage', fontsize=14)
+        plt.title('time-coverage', fontsize=16)
+        
+        # 添加網格和圖例
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend(fontsize=12)
+        
+        # 設置y軸範圍
+        plt.ylim(0, 1.05)
+        
+        # 保存圖片
+        coverage_plot_path = os.path.join(self.save_dir, 'coverage_over_time.png')
+        plt.savefig(coverage_plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # 保存數據到CSV文件以便後續分析
+        import pandas as pd
+        df = pd.DataFrame({
+            'Time': time_steps,
+            'Robot1_Coverage': robot1_coverage,
+            'Robot2_Coverage': robot2_coverage,
+            'Intersection': intersection_coverage,
+            'Union': union_coverage
+        })
+        df.to_csv(os.path.join(self.save_dir, 'coverage_data.csv'), index=False)
+        
+        print(f"覆蓋率圖表已保存到 {coverage_plot_path}")
+        print(f"覆蓋率數據已保存到 {os.path.join(self.save_dir, 'coverage_data.csv')}")

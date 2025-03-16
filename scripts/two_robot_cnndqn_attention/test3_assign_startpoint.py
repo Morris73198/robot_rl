@@ -309,6 +309,10 @@ def test_model(model_path, map_file_path=None, robot1_pos=None, robot2_pos=None,
                 tracker.generate_exploration_video()
             except Exception as e:
                 print(f"生成視頻時出錯: {str(e)}")
+
+
+            # 繪製覆蓋率隨時間變化的圖表
+            tracker.plot_coverage_over_time()
             
             # 記錄統計信息
             final_progress = robot1.get_exploration_progress()
@@ -407,7 +411,7 @@ def main():
     
     # 指定你想要評估的特定地圖檔案
     # 以下是一個示例路徑，請替換為你想要使用的實際地圖檔案路徑
-    specific_map_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6032b.png')
+    specific_map_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6031.png')
     
     # 檢查指定的地圖檔案是否存在
     if not os.path.exists(specific_map_path):
