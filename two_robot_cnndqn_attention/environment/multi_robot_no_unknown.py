@@ -111,6 +111,9 @@ class Robot:
             
             self.t = self.map_points(self.global_map)
             self.free_tree = spatial.KDTree(self.free_points(self.global_map).tolist())
+            
+            if self.plot:
+                self.initialize_visualization()
         else:
             # 次要機器人共享主要機器人的環境
             self.map_dir = shared_env.map_dir
@@ -141,16 +144,9 @@ class Robot:
             
             self.t = shared_env.t
             self.free_tree = shared_env.free_tree
-        
-        # Always initialize these tracking arrays, regardless of plot setting
-        self.xPoint = np.array([self.robot_position[0]])
-        self.yPoint = np.array([self.robot_position[1]])
-        self.x2frontier = np.empty([0])
-        self.y2frontier = np.empty([0])
             
-        # Only initialize visualization if plot is True
-        if self.plot:
-            self.initialize_visualization()
+            if self.plot:
+                self.initialize_visualization()
 
                 
                 
