@@ -6,6 +6,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import json
 from two_robot_cnndqn_attention.config import MODEL_DIR, ROBOT_CONFIG
+from two_robot_cnndqn_attention.environment.robot_local_map_tracker import RobotIndividualMapTracker  # Import the tracker
 
 class MultiRobotTrainer:
     def __init__(self, model, robot1, robot2, memory_size=10000, batch_size=16, gamma=0.99):
@@ -33,6 +34,9 @@ class MultiRobotTrainer:
             'robot2_rewards': [],
             'exploration_progress': []
         }
+        
+        # 創建機器人個人地圖追蹤器
+        self.map_tracker = RobotIndividualMapTracker(robot1, robot2)
     
     def remember(self, state, frontiers, robot1_pos, robot2_pos, 
                 robot1_target, robot2_target,
@@ -261,6 +265,9 @@ class MultiRobotTrainer:
                 state = self.robot1.begin()
                 self.robot2.begin()
                 
+                # 啟動地圖追蹤器
+                self.map_tracker.start_tracking()
+                
                 # 初始化episode統計
                 total_reward = 0
                 robot1_total_reward = 0
@@ -323,9 +330,8 @@ class MultiRobotTrainer:
                     self.robot1.other_robot_position = self.robot2.robot_position.copy()
                     self.robot2.other_robot_position = self.robot1.robot_position.copy()
                     
-                    # 計算獎勵
-                    
-                    
+                    # 更新地圖追蹤器
+                    self.map_tracker.update()
                     
                     # 保存經驗到回放緩衝區
                     if d1 or d2:
@@ -364,6 +370,13 @@ class MultiRobotTrainer:
                         if self.robot2.plot:
                             self.robot2.plot_env()
                 
+                # 計算重疊區域
+                overlap_ratio = self.map_tracker.calculate_overlap()
+                robot1_ratio, robot2_ratio = self.map_tracker.get_exploration_ratio()
+                
+                # 停止追蹤
+                self.map_tracker.stop_tracking()
+                
                 # Episode結束後的處理
                 exploration_progress = self.robot1.get_exploration_progress()
                 self.training_history['episode_rewards'].append(total_reward)
@@ -397,6 +410,11 @@ class MultiRobotTrainer:
                 print(f"平均損失: {self.training_history['losses'][-1]:.6f}")
                 print(f"探索進度: {exploration_progress:.1%}")
                 
+                # 印出機器人探索重疊信息
+                print(f"Robot1 探索覆蓋率: {robot1_ratio:.2%}")
+                print(f"Robot2 探索覆蓋率: {robot2_ratio:.2%}")
+                print(f"機器人local map區域交集: {overlap_ratio:.2%}")
+                
                 if exploration_progress >= self.robot1.finish_percent:
                     print("地圖探索完成！")
                 else:
@@ -421,6 +439,7 @@ class MultiRobotTrainer:
                 self.robot1.cleanup_visualization()
             if hasattr(self.robot2, 'cleanup_visualization'):
                 self.robot2.cleanup_visualization()
+            self.map_tracker.cleanup()
     
     def plot_training_progress(self):
         """繪製訓練進度圖"""
