@@ -2,7 +2,7 @@ import os
 import sys
 from two_robot_cnndqn_attention.models.multi_robot_network import MultiRobotNetworkModel
 from two_robot_cnndqn_attention.models.multi_robot_trainer import MultiRobotTrainer
-from two_robot_cnndqn_attention.environment.multi_robot import Robot
+from two_robot_cnndqn_attention.environment.multi_robot_no_unknown import Robot
 from two_robot_cnndqn_attention.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
 
 import matplotlib
@@ -13,8 +13,8 @@ plt.ion()
 def main():
     try:
         # 指定模型路徑
-        # model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000340.h5')
-        model_path = os.path.join(MODEL_DIR, 'xxx')
+        model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000420.h5')
+        # model_path = os.path.join(MODEL_DIR, 'xxx')
         
         # 創建模型
         print("正在創建模型...")
@@ -55,8 +55,8 @@ def main():
         )
         
         # 手動調整 epsilon 相關參數
-        trainer.epsilon = 1.0          # 設置當前的 epsilon 值 (探索率)
-        trainer.epsilon_min = 0.1     # 設置最小 epsilon 值
+        trainer.epsilon = 0.4          # 設置當前的 epsilon 值 (探索率)
+        trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
         trainer.epsilon_decay = 0.9975 # 設置 epsilon 衰減率
         
         # 確保模型保存目錄存在
