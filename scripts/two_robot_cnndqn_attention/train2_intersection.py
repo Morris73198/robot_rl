@@ -3,7 +3,7 @@ import sys
 import types
 from two_robot_cnndqn_attention.models.multi_robot_network import MultiRobotNetworkModel
 from two_robot_cnndqn_attention.models.multi_robot_trainer import MultiRobotTrainer
-from two_robot_cnndqn_attention.environment.multi_robot import Robot
+from two_robot_cnndqn_attention.environment.multi_robot_no_unknown import Robot
 from two_robot_cnndqn_attention.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
 from two_robot_cnndqn_attention.environment.robot_local_map_tracker import RobotIndividualMapTracker
 
@@ -15,8 +15,8 @@ plt.ion()
 def main():
     try:
         # 指定模型路徑
-        # model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000340.h5')
-        model_path = os.path.join(MODEL_DIR, 'xxx')
+        model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000420.h5')
+        # model_path = os.path.join(MODEL_DIR, 'xxx')
         
         # 創建模型
         print("正在創建模型...")
@@ -61,70 +61,69 @@ def main():
         )
         
         # 手動調整 epsilon 相關參數
-        trainer.epsilon = 1.0          # 設置當前的 epsilon 值 (探索率)
-        trainer.epsilon_min = 0.1     # 設置最小 epsilon 值
+        trainer.epsilon = 0.4          # 設置當前的 epsilon 值 (探索率)
+        trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
         trainer.epsilon_decay = 0.9975 # 設置 epsilon 衰減率
         
         # 確保模型保存目錄存在
         if not os.path.exists(MODEL_DIR):
             os.makedirs(MODEL_DIR)
+            
+        print(f"開始訓練... (當前 epsilon: {trainer.epsilon})")
+        remaining_episodes = max(0, TRAIN_CONFIG['episodes'] - start_episode)
         
         # 添加保存重疊比例的列表
         overlap_percentages = []
         
-        # 保存原始的 train 方法
-        original_train = trainer.train
+        # 獲取 MultiRobotTrainer 類的 train 方法源碼
+        # 因為我們不能直接看到源碼，所以這裡只能嘗試自己實現一個類似的 train 方法
+        # 根據原始 train 方法的參數和行為進行修改
         
-        # 定義修改後的 train 方法，添加重疊比例計算
-        def train_with_overlap_tracking(self, episodes, target_update_freq, save_freq):
-            # 開始追蹤地圖
-            map_tracker.start_tracking()
+        # 開始訓練，並手動追蹤重疊比例
+        map_tracker.start_tracking()
+        
+        for episode in range(1, remaining_episodes + 1):
+            # 重置環境
+            state1 = robot1.reset()
+            state2 = robot2.reset()
             
-            # 保存原始的 _train_episode 方法
-            original_train_episode = self._train_episode
+            episode_reward1 = 0
+            episode_reward2 = 0
             
-            # 定義修改後的 _train_episode 方法，增加對重疊比例的計算
-            def _train_episode_with_overlap(self, episode):
-                # 執行原始的 _train_episode 方法
-                result = original_train_episode(episode)
+            # 更新地圖追蹤
+            map_tracker.update()
+            
+            done = False
+            while not done:
+                # 假設 trainer 有方法來執行單步訓練
+                # 這裡只是示例，實際情況取決於 trainer 的實現
+                # 我們假設訓練器有一個 step 方法來執行單步訓練
+                # 如果 trainer 的接口不同，請調整以下代碼
                 
-                # 在每個 episode 結束時計算重疊比例
-                overlap_ratio = map_tracker.calculate_overlap()
-                overlap_percentage = overlap_ratio * 100
+                # 執行 trainer 的正常訓練（這裡使用原始的 train 方法）
+                trainer.train(1, TRAIN_CONFIG['target_update_freq'], TRAIN_CONFIG['save_freq'])
                 
-                # 打印重疊比例
-                print(f"Episode {episode} - 機器人探索區域重疊: {overlap_percentage:.2f}%")
+                # 更新地圖追蹤
+                map_tracker.update()
                 
-                # 保存重疊比例
-                overlap_percentages.append(overlap_percentage)
-                
-                # 重置追蹤器，開始下一輪
-                map_tracker.stop_tracking()
+                # 檢查是否完成
+                # 由於我們無法真正看到 trainer 的內部狀態，這裡我們假設一個 episode 只訓練一次
+                done = True
+            
+            # 計算重疊比例
+            overlap_ratio = map_tracker.calculate_overlap()
+            overlap_percentage = overlap_ratio * 100
+            
+            # 打印重疊比例
+            print(f"Episode {episode} - 機器人探索區域重疊: {overlap_percentage:.2f}%")
+            
+            # 保存重疊比例
+            overlap_percentages.append(overlap_percentage)
+            
+            # 重置追蹤器，開始下一輪
+            map_tracker.stop_tracking()
+            if episode < remaining_episodes:
                 map_tracker.start_tracking()
-                
-                return result
-            
-            # 替換 _train_episode 方法
-            self._train_episode = types.MethodType(_train_episode_with_overlap, self)
-            
-            # 調用原始的 train 方法
-            result = original_train(episodes, target_update_freq, save_freq)
-            
-            # 恢復原始的 _train_episode 方法
-            self._train_episode = original_train_episode
-            
-            return result
-        
-        # 替換訓練方法
-        trainer.train = types.MethodType(train_with_overlap_tracking, trainer)
-            
-        print(f"開始訓練... (當前 epsilon: {trainer.epsilon})")
-        remaining_episodes = max(0, TRAIN_CONFIG['episodes'] - start_episode)
-        trainer.train(
-            episodes=remaining_episodes,
-            target_update_freq=TRAIN_CONFIG['target_update_freq'],
-            save_freq=TRAIN_CONFIG['save_freq']
-        )
         
         # 訓練結束後，繪製重疊比例圖表
         plt.figure(figsize=(10, 6))
