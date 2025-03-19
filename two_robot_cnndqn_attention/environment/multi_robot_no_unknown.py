@@ -33,120 +33,124 @@ class Robot:
         return robot1, robot2
     
     def __init__(self, index_map, train, plot, is_primary=True, shared_env=None):
-        """初始化機器人環境
+    """初始化機器人環境
+    
+    Args:
+        index_map: 地圖索引
+        train: 是否處於訓練模式
+        plot: 是否繪製可視化
+        is_primary: 是否為主要機器人(負責加載地圖)
+        shared_env: 共享環境的機器人實例
+    """
+    if not shared_env and not is_primary:
+        raise ValueError("Non-primary robot must have a shared environment")
+    if shared_env and is_primary:
+        raise ValueError("Primary robot cannot have a shared environment")
+    self.mode = train
+    self.plot = plot
+    self.is_primary = is_primary
+    
+    self.shared_env = shared_env 
+    
+    
+    self.lethal_cost = 100  # 致命障礙物代價
+    self.decay_factor = 3  # 代價衰減因子
+    self.inflation_radius = ROBOT_CONFIG['robot_size'] * 1.5  # 膨脹半徑為機器人尺寸的1.5倍
+    
+    if is_primary:
+        # 主要機器人負責加載地圖和初始化環境
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
         
-        Args:
-            index_map: 地圖索引
-            train: 是否處於訓練模式
-            plot: 是否繪製可視化
-            is_primary: 是否為主要機器人(負責加載地圖)
-            shared_env: 共享環境的機器人實例
-        """
-        if not shared_env and not is_primary:
-            raise ValueError("Non-primary robot must have a shared environment")
-        if shared_env and is_primary:
-            raise ValueError("Primary robot cannot have a shared environment")
-        self.mode = train
-        self.plot = plot
-        self.is_primary = is_primary
+        if self.mode:
+            self.map_dir = os.path.join(base_dir, 'robot_rl/data', 'DungeonMaps', 'train')
+        else:
+            self.map_dir = os.path.join(base_dir, 'robot_rl/data', 'DungeonMaps', 'test')
+            
+        os.makedirs(self.map_dir, exist_ok=True)
         
-        self.shared_env = shared_env 
+        self.map_list = os.listdir(self.map_dir)
+        if not self.map_list:
+            raise FileNotFoundError(f"No map files found in {self.map_dir}")
+            
+        self.map_number = np.size(self.map_list)
+        if self.mode:
+            random.shuffle(self.map_list)
+            
+        self.li_map = index_map
         
+        # 初始化地圖
+        self.global_map, self.initial_positions = self.map_setup(
+            os.path.join(self.map_dir, self.map_list[self.li_map])
+        )
         
+        # 為兩個機器人選擇不同的起始位置
+        self.robot_position = self.initial_positions[0].astype(np.int64)
+        self.other_robot_position = self.initial_positions[1].astype(np.int64)
+        
+        self.op_map = np.ones(self.global_map.shape) * 127
+        self.map_size = np.shape(self.global_map)
+        
+        # 初始化其他屬性
+        self.movement_step = ROBOT_CONFIG['movement_step']
+        self.finish_percent = ROBOT_CONFIG['finish_percent']
+        self.sensor_range = ROBOT_CONFIG['sensor_range']
+        self.robot_size = ROBOT_CONFIG['robot_size']
+        self.local_size = ROBOT_CONFIG['local_size']
+        
+        # Initialize lethal_cost, decay_factor, and inflation_radius only once
         self.lethal_cost = 100  # 致命障礙物代價
         self.decay_factor = 3  # 代價衰減因子
-        self.inflation_radius = ROBOT_CONFIG['robot_size'] * 1.5  # 膨脹半徑為機器人尺寸的1.5倍
+        self.inflation_radius = self.robot_size * 1.5  # 膨脹半徑為機器人尺寸的1.5倍
         
-        if is_primary:
-            # 主要機器人負責加載地圖和初始化環境
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-            
-            if self.mode:
-                self.map_dir = os.path.join(base_dir, 'robot_rl/data', 'DungeonMaps', 'train')
-            else:
-                self.map_dir = os.path.join(base_dir, 'robot_rl/data', 'DungeonMaps', 'test')
-                
-            os.makedirs(self.map_dir, exist_ok=True)
-            
-            self.map_list = os.listdir(self.map_dir)
-            if not self.map_list:
-                raise FileNotFoundError(f"No map files found in {self.map_dir}")
-                
-            self.map_number = np.size(self.map_list)
-            if self.mode:
-                random.shuffle(self.map_list)
-                
-            self.li_map = index_map
-            
-            # 初始化地圖
-            self.global_map, self.initial_positions = self.map_setup(
-                os.path.join(self.map_dir, self.map_list[self.li_map])
-            )
-            
-            # 為兩個機器人選擇不同的起始位置
-            self.robot_position = self.initial_positions[0].astype(np.int64)
-            self.other_robot_position = self.initial_positions[1].astype(np.int64)
-            
-            self.op_map = np.ones(self.global_map.shape) * 127
-            self.map_size = np.shape(self.global_map)
-            
-            # 初始化其他屬性
-            self.movement_step = ROBOT_CONFIG['movement_step']
-            self.finish_percent = ROBOT_CONFIG['finish_percent']
-            self.sensor_range = ROBOT_CONFIG['sensor_range']
-            self.robot_size = ROBOT_CONFIG['robot_size']
-            self.local_size = ROBOT_CONFIG['local_size']
-            
-            # Initialize lethal_cost, decay_factor, and inflation_radius only once
-            self.lethal_cost = 100  # 致命障礙物代價
-            self.decay_factor = 3  # 代價衰減因子
-            self.inflation_radius = self.robot_size * 1.5  # 膨脹半徑為機器人尺寸的1.5倍
-            
-            self.old_position = np.zeros([2])
-            self.old_op_map = np.empty([0])
-            self.current_target_frontier = None
-            self.is_moving_to_target = False
-            self.steps = 0
-            
-            self.t = self.map_points(self.global_map)
-            self.free_tree = spatial.KDTree(self.free_points(self.global_map).tolist())
-            
-            if self.plot:
-                self.initialize_visualization()
-        else:
-            # 次要機器人共享主要機器人的環境
-            self.map_dir = shared_env.map_dir
-            self.map_list = shared_env.map_list
-            self.map_number = shared_env.map_number
-            self.li_map = shared_env.li_map
-            
-            self.global_map = shared_env.global_map
-            self.op_map = shared_env.op_map
-            self.map_size = shared_env.map_size
-            
-            # 使用不同的起始位置
-            self.robot_position = shared_env.other_robot_position.copy()
-            self.other_robot_position = shared_env.robot_position.copy()
-            
-            # 共享其他屬性
-            self.movement_step = shared_env.movement_step
-            self.finish_percent = shared_env.finish_percent
-            self.sensor_range = shared_env.sensor_range
-            self.robot_size = shared_env.robot_size 
-            self.local_size = shared_env.local_size
-            
-            self.old_position = np.zeros([2])
-            self.old_op_map = np.empty([0])
-            self.current_target_frontier = None
-            self.is_moving_to_target = False
-            self.steps = 0
-            
-            self.t = shared_env.t
-            self.free_tree = shared_env.free_tree
-            
-            if self.plot:
-                self.initialize_visualization()
+        self.old_position = np.zeros([2])
+        self.old_op_map = np.empty([0])
+        self.current_target_frontier = None
+        self.is_moving_to_target = False
+        self.steps = 0
+        
+        self.t = self.map_points(self.global_map)
+        self.free_tree = spatial.KDTree(self.free_points(self.global_map).tolist())
+    else:
+        # 次要機器人共享主要機器人的環境
+        self.map_dir = shared_env.map_dir
+        self.map_list = shared_env.map_list
+        self.map_number = shared_env.map_number
+        self.li_map = shared_env.li_map
+        
+        self.global_map = shared_env.global_map
+        self.op_map = shared_env.op_map
+        self.map_size = shared_env.map_size
+        
+        # 使用不同的起始位置
+        self.robot_position = shared_env.other_robot_position.copy()
+        self.other_robot_position = shared_env.robot_position.copy()
+        
+        # 共享其他屬性
+        self.movement_step = shared_env.movement_step
+        self.finish_percent = shared_env.finish_percent
+        self.sensor_range = shared_env.sensor_range
+        self.robot_size = shared_env.robot_size 
+        self.local_size = shared_env.local_size
+        
+        self.old_position = np.zeros([2])
+        self.old_op_map = np.empty([0])
+        self.current_target_frontier = None
+        self.is_moving_to_target = False
+        self.steps = 0
+        
+        self.t = shared_env.t
+        self.free_tree = shared_env.free_tree
+    
+    # Always initialize these tracking arrays, regardless of plot setting
+    self.xPoint = np.array([self.robot_position[0]])
+    self.yPoint = np.array([self.robot_position[1]])
+    self.x2frontier = np.empty([0])
+    self.y2frontier = np.empty([0])
+        
+    # Only initialize visualization if plot is True
+    if self.plot:
+        self.initialize_visualization()
 
                 
                 
