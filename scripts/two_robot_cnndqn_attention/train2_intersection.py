@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 from two_robot_cnndqn_attention.models.multi_robot_network import MultiRobotNetworkModel
 from two_robot_cnndqn_attention.models.multi_robot_trainer import MultiRobotTrainer
 from two_robot_cnndqn_attention.environment.multi_robot import Robot
@@ -71,35 +72,51 @@ def main():
         # 添加保存重疊比例的列表
         overlap_percentages = []
         
-        # 修改訓練器的train方法
+        # 保存原始的 train 方法
         original_train = trainer.train
         
-        def train_with_overlap_tracking(*args, **kwargs):
+        # 定義修改後的 train 方法，添加重疊比例計算
+        def train_with_overlap_tracking(self, episodes, target_update_freq, save_freq):
             # 開始追蹤地圖
             map_tracker.start_tracking()
             
-            # 在每個episode結束時添加回調
-            def episode_end_callback(episode, total_reward, robot1_reward, robot2_reward):
-                # 計算重疊比例
+            # 保存原始的 _train_episode 方法
+            original_train_episode = self._train_episode
+            
+            # 定義修改後的 _train_episode 方法，增加對重疊比例的計算
+            def _train_episode_with_overlap(self, episode):
+                # 執行原始的 _train_episode 方法
+                result = original_train_episode(episode)
+                
+                # 在每個 episode 結束時計算重疊比例
                 overlap_ratio = map_tracker.calculate_overlap()
                 overlap_percentage = overlap_ratio * 100
-                
-                # 保存到列表
-                overlap_percentages.append(overlap_percentage)
                 
                 # 打印重疊比例
                 print(f"Episode {episode} - 機器人探索區域重疊: {overlap_percentage:.2f}%")
                 
+                # 保存重疊比例
+                overlap_percentages.append(overlap_percentage)
+                
                 # 重置追蹤器，開始下一輪
                 map_tracker.stop_tracking()
                 map_tracker.start_tracking()
+                
+                return result
             
-            # 調用原始訓練方法，並傳入回調
-            kwargs['episode_end_callback'] = episode_end_callback
-            return original_train(*args, **kwargs)
+            # 替換 _train_episode 方法
+            self._train_episode = types.MethodType(_train_episode_with_overlap, self)
+            
+            # 調用原始的 train 方法
+            result = original_train(episodes, target_update_freq, save_freq)
+            
+            # 恢復原始的 _train_episode 方法
+            self._train_episode = original_train_episode
+            
+            return result
         
         # 替換訓練方法
-        trainer.train = train_with_overlap_tracking
+        trainer.train = types.MethodType(train_with_overlap_tracking, trainer)
             
         print(f"開始訓練... (當前 epsilon: {trainer.epsilon})")
         remaining_episodes = max(0, TRAIN_CONFIG['episodes'] - start_episode)
