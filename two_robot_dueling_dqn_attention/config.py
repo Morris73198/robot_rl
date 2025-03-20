@@ -27,7 +27,7 @@ TRAIN_CONFIG = {
 # 機器人配置
 ROBOT_CONFIG = {
     # 基礎配置
-    'sensor_range': 80,              # 感測器範圍
+    'sensor_range': 50,              # 感測器範圍
     'robot_size': 2,                 # 機器人尺寸
     'local_size': 40,                # 局部地圖大小
     'finish_percent': 0.995,         # 探索完成閾值

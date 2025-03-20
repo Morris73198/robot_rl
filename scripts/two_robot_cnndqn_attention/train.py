@@ -40,7 +40,7 @@ def main():
         robot1, robot2 = Robot.create_shared_robots(
             index_map=0, 
             train=True, 
-            plot=False
+            plot=True
         )
         
         # 創建訓練器並手動設置 epsilon 相關參數
