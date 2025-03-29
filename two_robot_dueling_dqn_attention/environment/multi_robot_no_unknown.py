@@ -411,7 +411,7 @@ class Robot:
             hasattr(other_robot, 'yPoint') and 
             len(other_robot.xPoint) > 0):
             
-            recent_history = 50
+            recent_history = 500
             start_idx = max(0, len(other_robot.xPoint) - recent_history)
             
             other_path = np.column_stack((
@@ -424,9 +424,9 @@ class Robot:
             
             safe_distance = ROBOT_CONFIG['sensor_range'] * 1.5
             if min_distance < safe_distance:
-                other_path_penalty = -2 * np.exp(-min_distance/safe_distance)
+                other_path_penalty = -5 * np.exp(-min_distance/safe_distance)
             else:
-                other_path_penalty = 1
+                other_path_penalty = 2.5
         
         distance_reward = 0
         if self.other_robot_position is not None:
@@ -441,19 +441,26 @@ class Robot:
             overlap_ratio = self.map_tracker.calculate_overlap()
             # 根據交集比例應用懲罰
             # 交集越高，懲罰越大
-            overlap_penalty = -3.0 * overlap_ratio  # 可以調整比例因子
+            overlap_penalty = -30.0 * overlap_ratio  # 可以調整比例因子
+            print(overlap_ratio)
         
         # 將新的交集懲罰加入總獎勵
         total_reward = (
             exploration_reward +
             efficiency_reward +
-            distance_reward +
+            # distance_reward +
             other_path_penalty +
             overlap_penalty  # 新增組件
         )
+        # print(exploration_reward)
+        # print(efficiency_reward)
+        # print(other_path_penalty)
+        # print(overlap_penalty)
+        # # print(overlap_ratio)
+        # print("++++++++")
         
-        return total_reward
-        # return np.clip(total_reward, -1, 1)
+        # return total_reward
+        return np.clip(total_reward, -10, 10)
 
 
     def map_setup(self, location):
@@ -652,6 +659,77 @@ class Robot:
         sorted_indices = np.argsort(scores)
         
         return frontiers[sorted_indices]
+    
+    
+    # def get_frontiers(self):
+    #     """優化frontier選擇策略，不改變神經網路"""
+    #     if self.is_moving_to_target and self.current_target_frontier is not None:
+    #         return np.array([self.current_target_frontier])
+            
+    #     frontiers = self.frontier(self.op_map, self.map_size, self.t)
+    #     if len(frontiers) == 0:
+    #         return np.zeros((0, 2))
+            
+    #     # 計算每個frontier的多個效用因素
+    #     scores = np.zeros(len(frontiers))
+        
+    #     # 1. 距離因素 - 傾向於選擇較近的frontier
+    #     distances = np.linalg.norm(frontiers - self.robot_position, axis=1)
+    #     max_dist = np.max(distances) if len(distances) > 0 else 1.0
+    #     normalized_distances = distances / max_dist
+        
+    #     # 2. 其他機器人距離 - 避免兩個機器人選擇相同區域
+    #     other_distances = np.linalg.norm(frontiers - self.other_robot_position, axis=1)
+    #     normalized_other_distances = other_distances / max_dist
+        
+    #     # 3. 區域劃分 - 簡單地基於x座標劃分兩個機器人的責任區域
+    #     is_primary = getattr(self, 'is_primary', True)
+    #     mid_x = self.map_size[1] / 2
+        
+    #     area_scores = np.zeros(len(frontiers))
+    #     for i, frontier in enumerate(frontiers):
+    #         if is_primary:
+    #             # 主要機器人偏好左側
+    #             area_scores[i] = 1 - min(1, frontier[0] / mid_x)
+    #         else:
+    #             # 次要機器人偏好右側
+    #             area_scores[i] = min(1, frontier[0] / mid_x)
+        
+    #     # 4. 方向一致性 - 避免頻繁改變方向
+    #     direction_scores = np.ones(len(frontiers))
+    #     if len(self.xPoint) >= 3:
+    #         current_direction = np.array([
+    #             self.xPoint[-1] - self.xPoint[-3],
+    #             self.yPoint[-1] - self.yPoint[-3]
+    #         ])
+            
+    #         norm = np.linalg.norm(current_direction)
+    #         if norm > 1e-6:
+    #             current_direction = current_direction / norm
+                
+    #             for i, frontier in enumerate(frontiers):
+    #                 target_direction = frontier - self.robot_position
+    #                 target_norm = np.linalg.norm(target_direction)
+                    
+    #                 if target_norm > 1e-6:
+    #                     target_direction = target_direction / target_norm
+    #                     # 方向一致性得分 (0~1)
+    #                     direction_scores[i] = (np.dot(current_direction, target_direction) + 1) / 2
+        
+    #     # 整合所有因素
+    #     scores = (
+    #         -0.3 * normalized_distances      # 距離因素 (負值表示越近越好)
+    #         +0.3 * normalized_other_distances # 與另一機器人保持距離
+    #         +0.3 * area_scores               # 區域劃分
+    #         +0.1 * direction_scores          # 方向一致性
+    #     )
+        
+    #     # 根據得分排序
+    #     sorted_indices = np.argsort(-scores)  # 降序
+        
+    #     return frontiers[sorted_indices]
+    
+    
 
     def plot_env(self):
         """繪製環境和機器人"""

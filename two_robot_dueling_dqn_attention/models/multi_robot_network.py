@@ -431,16 +431,16 @@ class MultiRobotNetworkModel:
         
         # 使用自定義的學習率調度器
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=0.001,
-            decay_steps=1000,
-            decay_rate=0.9
+            initial_learning_rate=0.0005,#原0.001
+            decay_steps=2000,#原1000
+            decay_rate=0.95#原0.9
         )
         
         # 編譯模型
         model.compile(
             optimizer=tf.keras.optimizers.Adam(
                 learning_rate=lr_schedule,
-                clipnorm=1.0,
+                clipnorm=0.5,#原1.0
                 beta_1=0.9,
                 beta_2=0.999,
                 epsilon=1e-7

@@ -5,7 +5,7 @@ from collections import deque
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import json
-from two_robot_dueling_dqn_attention.config import MODEL_DIR, ROBOT_CONFIG
+from two_robot_dueling_dqn_attention.config import MODEL_DIR, ROBOT_CONFIG, REWARD_CONFIG
 from two_robot_dueling_dqn_attention.environment.robot_local_map_tracker import RobotIndividualMapTracker  # Import the tracker
 
 class MultiRobotTrainer:
@@ -276,6 +276,7 @@ class MultiRobotTrainer:
                 episode_losses = []
                 
                 while not (self.robot1.check_done() or self.robot2.check_done()):
+                # while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
@@ -369,6 +370,9 @@ class MultiRobotTrainer:
                             self.robot1.plot_env()
                         if self.robot2.plot:
                             self.robot2.plot_env()
+                            
+                # if steps < 1500:
+                #     total_reward += REWARD_CONFIG['completion_reward']
                 
                 # 計算重疊區域
                 overlap_ratio = self.map_tracker.calculate_overlap()

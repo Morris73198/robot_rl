@@ -9,10 +9,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import spatial
 import csv
-from two_robot_cnndqn_attention.models.multi_robot_network import MultiRobotNetworkModel
-from two_robot_cnndqn_attention.environment.multi_robot_with_unknown import Robot
-from two_robot_cnndqn_attention.config import MODEL_CONFIG, MODEL_DIR
-from two_robot_cnndqn_attention.environment.robot_local_map_tracker import RobotIndividualMapTracker
+from two_robot_dueling_dqn_attention.models.multi_robot_network import MultiRobotNetworkModel
+from two_robot_dueling_dqn_attention.environment.multi_robot_no_unknown import Robot
+from two_robot_dueling_dqn_attention.config import MODEL_CONFIG, MODEL_DIR
+from two_robot_dueling_dqn_attention.environment.robot_local_map_tracker import RobotIndividualMapTracker
 
 def save_plot(robot, step, output_path):
     """儲存單個機器人的繪圖
@@ -450,7 +450,7 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
 
 def main():
     # 指定模型路徑
-    model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000220.h5')
+    model_path = os.path.join(MODEL_DIR, 'best0320.h5')
     
     if not os.path.exists(model_path):
         print(f"錯誤: 在 {model_path} 找不到模型檔案")
