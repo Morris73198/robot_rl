@@ -465,6 +465,9 @@ class MultiRobotTrainer:
                 steps = 0
                 episode_losses = []
                 
+                # 在循環外定義 MIN_TARGET_DISTANCE，避免未定義錯誤
+                MIN_TARGET_DISTANCE = self.robot1.sensor_range * 1.5
+                
                 while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
@@ -483,6 +486,11 @@ class MultiRobotTrainer:
                     robot2_target = (np.zeros(2) if self.robot2.current_target_frontier is None 
                                 else self.robot2.current_target_frontier / map_dims)
                     
+                    valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+                    
+                    # 初始化 robot2_q，避免未定義錯誤
+                    robot2_q = np.zeros(valid_frontiers)
+                    
                     # 選擇動作（使用增強的epsilon-greedy策略）
                     if np.random.random() < self.epsilon:
                         # 增加隨機性：有30%的概率選擇距離當前位置最遠的frontier點
@@ -493,7 +501,6 @@ class MultiRobotTrainer:
                             robot2_action = np.argmax(distances2)
                         else:
                             # 常規隨機選擇
-                            valid_frontiers = min(self.model.max_frontiers, len(frontiers))
                             robot1_action = np.random.randint(valid_frontiers)
                             robot2_action = np.random.randint(valid_frontiers)
                     else:
@@ -507,12 +514,8 @@ class MultiRobotTrainer:
                             np.expand_dims(robot2_target, 0)
                         )
                         
-                        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
                         robot1_q = predictions['robot1'][0, :valid_frontiers].copy()
                         robot2_q = predictions['robot2'][0, :valid_frontiers].copy()
-                        
-                        # 協調選擇：避免兩個機器人選擇相近的目標
-                        MIN_TARGET_DISTANCE = self.robot1.sensor_range * 1.5
                         
                         # 先讓robot1選擇
                         robot1_action = np.argmax(robot1_q)
@@ -544,16 +547,24 @@ class MultiRobotTrainer:
                             self.robot2.current_target_frontier - robot1_target_point)
                         
                         if distance_between_targets < MIN_TARGET_DISTANCE:
-                            # 如果目標太近，為robot2重新選擇目標
-                            adjusted_robot2_q = robot2_q.copy()
-                            for i in range(valid_frontiers):
-                                distance = np.linalg.norm(frontiers[i] - robot1_target_point)
-                                if distance < MIN_TARGET_DISTANCE:
-                                    penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
-                                    adjusted_robot2_q[i] *= (1.0 - penalty * 0.9)
-                            
-                            new_robot2_action = np.argmax(adjusted_robot2_q)
-                            robot2_target_point = frontiers[new_robot2_action]
+                            # 如果需要重新選擇，且我們在使用模型預測模式時
+                            if np.random.random() >= self.epsilon:
+                                # 如果目標太近，為robot2重新選擇目標
+                                adjusted_robot2_q = robot2_q.copy()
+                                for i in range(valid_frontiers):
+                                    distance = np.linalg.norm(frontiers[i] - robot1_target_point)
+                                    if distance < MIN_TARGET_DISTANCE:
+                                        penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
+                                        adjusted_robot2_q[i] *= (1.0 - penalty * 0.9)
+                                
+                                new_robot2_action = np.argmax(adjusted_robot2_q)
+                                robot2_target_point = frontiers[new_robot2_action]
+                            else:
+                                # 在隨機模式下，簡單地選擇一個遠離robot1目標的點
+                                distances = np.linalg.norm(frontiers - robot1_target_point, axis=1)
+                                farthest_indices = np.argsort(distances)[-min(5, valid_frontiers):]  # 選最遠的5個點
+                                new_robot2_action = farthest_indices[np.random.randint(len(farthest_indices))]
+                                robot2_target_point = frontiers[new_robot2_action]
                     
                     next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target_point)
                     robot2_reward = r2
@@ -635,8 +646,9 @@ class MultiRobotTrainer:
                     self.save_checkpoint(episode + 1)
                     self.plot_training_progress()
                     
-                    # 保存覆蓋率隨時間變化的圖表
-                    self.map_tracker.plot_coverage_over_time()
+                    # 儲存覆蓋率隨時間變化的圖表
+                    if hasattr(self.map_tracker, 'plot_coverage_over_time'):
+                        self.map_tracker.plot_coverage_over_time()
                 
                 # 更新探索率
                 if self.epsilon > self.epsilon_min:

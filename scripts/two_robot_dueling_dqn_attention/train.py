@@ -50,8 +50,8 @@ def fine_tune_without_architecture_change(pretrained_path):
 def main():
     try:
         # 指定模型路徑
-        model_path = os.path.join(MODEL_DIR, 'xxx.h5')
-        # model_path = os.path.join(MODEL_DIR, 'best0111.h5')
+        # model_path = os.path.join(MODEL_DIR, 'xxx.h5')
+        model_path = os.path.join(MODEL_DIR, 'best0111.h5')
 
         
         if os.path.exists(model_path):
@@ -79,9 +79,9 @@ def main():
             )
             
             # 調整探索參數
-            trainer.epsilon = 0.5          # 設置當前的 epsilon 值
+            trainer.epsilon = 0.35          # 設置當前的 epsilon 值
             trainer.epsilon_min = 0.05     # 設置最小 epsilon 值
-            trainer.epsilon_decay = 0.999  # 設置 epsilon 衰減率
+            trainer.epsilon_decay = 0.99995  # 設置 epsilon 衰減率
             
             print(f"開始訓練... (當前 epsilon: {trainer.epsilon})")
             trainer.train(
