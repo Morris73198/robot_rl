@@ -257,6 +257,196 @@ class MultiRobotTrainer:
         
         return loss
     
+    # def train(self, episodes=1000000, target_update_freq=10, save_freq=10):
+    #     """執行多機器人協同訓練"""
+    #     try:
+    #         for episode in range(episodes):
+    #             # 初始化環境和狀態
+    #             state = self.robot1.begin()
+    #             self.robot2.begin()
+                
+    #             # 啟動地圖追蹤器
+    #             self.map_tracker.start_tracking()
+                
+    #             # 初始化episode統計
+    #             total_reward = 0
+    #             robot1_total_reward = 0
+    #             robot2_total_reward = 0
+    #             steps = 0
+    #             episode_losses = []
+                
+    #             # while not (self.robot1.check_done() or self.robot2.check_done()):
+    #             while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
+    #                 frontiers = self.robot1.get_frontiers()
+    #                 if len(frontiers) == 0:
+    #                     break
+                        
+    #                 # 獲取當前狀態
+    #                 robot1_pos = self.robot1.get_normalized_position()
+    #                 robot2_pos = self.robot2.get_normalized_position()
+    #                 old_robot1_pos = self.robot1.robot_position.copy()
+    #                 old_robot2_pos = self.robot2.robot_position.copy()
+                    
+    #                 # 標準化目標位置
+    #                 map_dims = np.array([float(self.robot1.map_size[1]), float(self.robot1.map_size[0])])
+    #                 robot1_target = (np.zeros(2) if self.robot1.current_target_frontier is None 
+    #                             else self.robot1.current_target_frontier / map_dims)
+    #                 robot2_target = (np.zeros(2) if self.robot2.current_target_frontier is None 
+    #                             else self.robot2.current_target_frontier / map_dims)
+                    
+    #                 # 選擇動作（使用epsilon-greedy策略）
+    #                 if np.random.random() < self.epsilon:
+    #                     valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+    #                     robot1_action = np.random.randint(valid_frontiers)
+    #                     robot2_action = np.random.randint(valid_frontiers)
+    #                 else:
+    #                     # 使用模型預測
+    #                     predictions = self.model.predict(
+    #                         np.expand_dims(state, 0),
+    #                         np.expand_dims(self.pad_frontiers(frontiers), 0),
+    #                         np.expand_dims(robot1_pos, 0),
+    #                         np.expand_dims(robot2_pos, 0),
+    #                         np.expand_dims(robot1_target, 0),
+    #                         np.expand_dims(robot2_target, 0)
+    #                     )
+                        
+    #                     valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+    #                     robot1_action = np.argmax(predictions['robot1'][0, :valid_frontiers])
+    #                     robot2_action = np.argmax(predictions['robot2'][0, :valid_frontiers])
+                    
+    #                 # 設置目標並執行移動
+    #                 robot1_target = frontiers[robot1_action]
+    #                 robot2_target = frontiers[robot2_action]
+                    
+    #                 # 移動機器人
+    #                 next_state1, r1, d1 = self.robot1.move_to_frontier(robot1_target)
+    #                 robot1_reward = r1
+    #                 self.robot2.op_map = self.robot1.op_map.copy()
+                    
+    #                 next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target)
+    #                 robot2_reward = r2
+    #                 self.robot1.op_map = self.robot2.op_map.copy()
+                    
+    #                 # 更新機器人位置
+    #                 self.robot1.other_robot_position = self.robot2.robot_position.copy()
+    #                 self.robot2.other_robot_position = self.robot1.robot_position.copy()
+                    
+    #                 # 更新地圖追蹤器
+    #                 self.map_tracker.update()
+                    
+    #                 # 保存經驗到回放緩衝區
+    #                 if d1 or d2:
+    #                     self.remember(
+    #                         state, frontiers, robot1_pos, robot2_pos,
+    #                         self.robot1.current_target_frontier, self.robot2.current_target_frontier,
+    #                         robot1_action, robot2_action,
+    #                         robot1_reward, robot2_reward,
+    #                         next_state1, frontiers, 
+    #                         self.robot1.get_normalized_position(), 
+    #                         self.robot2.get_normalized_position(),
+    #                         self.robot1.current_target_frontier,
+    #                         self.robot2.current_target_frontier,
+    #                         True
+    #                     )
+                        
+    #                     # 進行訓練
+    #                     loss = self.train_step()
+    #                     if loss is not None:
+    #                         if isinstance(loss, list):
+    #                             episode_losses.append(np.mean(loss))
+    #                         else:
+    #                             episode_losses.append(loss)
+                    
+    #                 # 更新狀態和獎勵
+    #                 state = next_state1
+    #                 total_reward += (robot1_reward + robot2_reward)
+    #                 robot1_total_reward += robot1_reward
+    #                 robot2_total_reward += robot2_reward
+    #                 steps += 1
+                    
+    #                 # 更新視覺化
+    #                 if steps % ROBOT_CONFIG['plot_interval'] == 0:
+    #                     if self.robot1.plot:
+    #                         self.robot1.plot_env()
+    #                     if self.robot2.plot:
+    #                         self.robot2.plot_env()
+                            
+    #             # if steps < 1500:
+    #             #     total_reward += REWARD_CONFIG['completion_reward']
+                
+    #             # 計算重疊區域
+    #             overlap_ratio = self.map_tracker.calculate_overlap()
+    #             robot1_ratio, robot2_ratio = self.map_tracker.get_exploration_ratio()
+                
+    #             # 停止追蹤
+    #             self.map_tracker.stop_tracking()
+                
+    #             # Episode結束後的處理
+    #             exploration_progress = self.robot1.get_exploration_progress()
+    #             self.training_history['episode_rewards'].append(total_reward)
+    #             self.training_history['robot1_rewards'].append(robot1_total_reward)
+    #             self.training_history['robot2_rewards'].append(robot2_total_reward)
+    #             self.training_history['episode_lengths'].append(steps)
+    #             self.training_history['exploration_rates'].append(self.epsilon)
+    #             self.training_history['losses'].append(
+    #                 np.mean(episode_losses) if episode_losses else 0
+    #             )
+    #             self.training_history['exploration_progress'].append(exploration_progress)
+                
+    #             # 更新目標網絡和保存模型
+    #             if (episode + 1) % target_update_freq == 0:
+    #                 self.model.update_target_model()
+                
+    #             if (episode + 1) % save_freq == 0:
+    #                 self.save_checkpoint(episode + 1)
+    #                 self.plot_training_progress()
+                
+    #             # 更新探索率
+    #             if self.epsilon > self.epsilon_min:
+    #                 self.epsilon *= self.epsilon_decay
+                
+    #             # 列印訓練信息
+    #             print(f"\n第 {episode + 1}/{episodes} 輪 (地圖 {self.robot1.li_map})")
+    #             print(f"步數: {steps}, 總獎勵: {total_reward:.2f}")
+    #             print(f"Robot1 獎勵: {robot1_total_reward:.2f}")
+    #             print(f"Robot2 獎勵: {robot2_total_reward:.2f}")
+    #             print(f"探索率: {self.epsilon:.3f}")
+    #             print(f"平均損失: {self.training_history['losses'][-1]:.6f}")
+    #             print(f"探索進度: {exploration_progress:.1%}")
+                
+    #             # 印出機器人探索重疊信息
+    #             print(f"Robot1 探索覆蓋率: {robot1_ratio:.2%}")
+    #             print(f"Robot2 探索覆蓋率: {robot2_ratio:.2%}")
+    #             print(f"機器人local map區域交集: {overlap_ratio:.2%}")
+                
+    #             if exploration_progress >= self.robot1.finish_percent:
+    #                 print("地圖探索完成！")
+    #             else:
+    #                 print("地圖探索未完成")
+    #             print("-" * 50)
+                
+    #             # 重置環境
+    #             state = self.robot1.reset()
+    #             self.robot2.reset()
+            
+    #         # 訓練結束後保存最終模型
+    #         self.save_checkpoint(episodes)
+            
+    #     except Exception as e:
+    #         print(f"訓練過程出現錯誤: {str(e)}")
+    #         import traceback
+    #         traceback.print_exc()
+            
+    #     finally:
+    #         # 確保清理資源
+    #         if hasattr(self.robot1, 'cleanup_visualization'):
+    #             self.robot1.cleanup_visualization()
+    #         if hasattr(self.robot2, 'cleanup_visualization'):
+    #             self.robot2.cleanup_visualization()
+    #         self.map_tracker.cleanup()
+    
+    
+    
     def train(self, episodes=1000000, target_update_freq=10, save_freq=10):
         """執行多機器人協同訓練"""
         try:
@@ -275,8 +465,7 @@ class MultiRobotTrainer:
                 steps = 0
                 episode_losses = []
                 
-                while not (self.robot1.check_done() or self.robot2.check_done()):
-                # while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
+                while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
@@ -294,11 +483,19 @@ class MultiRobotTrainer:
                     robot2_target = (np.zeros(2) if self.robot2.current_target_frontier is None 
                                 else self.robot2.current_target_frontier / map_dims)
                     
-                    # 選擇動作（使用epsilon-greedy策略）
+                    # 選擇動作（使用增強的epsilon-greedy策略）
                     if np.random.random() < self.epsilon:
-                        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-                        robot1_action = np.random.randint(valid_frontiers)
-                        robot2_action = np.random.randint(valid_frontiers)
+                        # 增加隨機性：有30%的概率選擇距離當前位置最遠的frontier點
+                        if np.random.random() < 0.3 and len(frontiers) > 0:
+                            distances1 = np.linalg.norm(frontiers - self.robot1.robot_position, axis=1)
+                            distances2 = np.linalg.norm(frontiers - self.robot2.robot_position, axis=1)
+                            robot1_action = np.argmax(distances1)
+                            robot2_action = np.argmax(distances2)
+                        else:
+                            # 常規隨機選擇
+                            valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+                            robot1_action = np.random.randint(valid_frontiers)
+                            robot2_action = np.random.randint(valid_frontiers)
                     else:
                         # 使用模型預測
                         predictions = self.model.predict(
@@ -311,20 +508,56 @@ class MultiRobotTrainer:
                         )
                         
                         valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-                        robot1_action = np.argmax(predictions['robot1'][0, :valid_frontiers])
-                        robot2_action = np.argmax(predictions['robot2'][0, :valid_frontiers])
+                        robot1_q = predictions['robot1'][0, :valid_frontiers].copy()
+                        robot2_q = predictions['robot2'][0, :valid_frontiers].copy()
+                        
+                        # 協調選擇：避免兩個機器人選擇相近的目標
+                        MIN_TARGET_DISTANCE = self.robot1.sensor_range * 1.5
+                        
+                        # 先讓robot1選擇
+                        robot1_action = np.argmax(robot1_q)
+                        robot1_target_point = frontiers[robot1_action]
+                        
+                        # 為robot2調整Q值，降低接近robot1目標的點的價值
+                        for i in range(valid_frontiers):
+                            distance = np.linalg.norm(frontiers[i] - robot1_target_point)
+                            if distance < MIN_TARGET_DISTANCE:
+                                # 使用距離相關的懲罰因子
+                                penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
+                                robot2_q[i] *= (1.0 - penalty * 0.9)
+                        
+                        robot2_action = np.argmax(robot2_q)
                     
                     # 設置目標並執行移動
-                    robot1_target = frontiers[robot1_action]
-                    robot2_target = frontiers[robot2_action]
+                    robot1_target_point = frontiers[robot1_action]
+                    robot2_target_point = frontiers[robot2_action]
                     
                     # 移動機器人
-                    next_state1, r1, d1 = self.robot1.move_to_frontier(robot1_target)
+                    next_state1, r1, d1 = self.robot1.move_to_frontier(robot1_target_point)
                     robot1_reward = r1
+                    # 更新共享地圖
                     self.robot2.op_map = self.robot1.op_map.copy()
                     
-                    next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target)
+                    # 檢查robot2是否需要重新選擇目標（如果robot1選了相近的點）
+                    if not d1 and self.robot2.current_target_frontier is not None:
+                        distance_between_targets = np.linalg.norm(
+                            self.robot2.current_target_frontier - robot1_target_point)
+                        
+                        if distance_between_targets < MIN_TARGET_DISTANCE:
+                            # 如果目標太近，為robot2重新選擇目標
+                            adjusted_robot2_q = robot2_q.copy()
+                            for i in range(valid_frontiers):
+                                distance = np.linalg.norm(frontiers[i] - robot1_target_point)
+                                if distance < MIN_TARGET_DISTANCE:
+                                    penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
+                                    adjusted_robot2_q[i] *= (1.0 - penalty * 0.9)
+                            
+                            new_robot2_action = np.argmax(adjusted_robot2_q)
+                            robot2_target_point = frontiers[new_robot2_action]
+                    
+                    next_state2, r2, d2 = self.robot2.move_to_frontier(robot2_target_point)
                     robot2_reward = r2
+                    # 更新共享地圖
                     self.robot1.op_map = self.robot2.op_map.copy()
                     
                     # 更新機器人位置
@@ -333,6 +566,10 @@ class MultiRobotTrainer:
                     
                     # 更新地圖追蹤器
                     self.map_tracker.update()
+                    
+                    # 為了保持數值穩定性，裁剪獎勵值
+                    robot1_reward = np.clip(robot1_reward, -10, 10)
+                    robot2_reward = np.clip(robot2_reward, -10, 10)
                     
                     # 保存經驗到回放緩衝區
                     if d1 or d2:
@@ -370,9 +607,6 @@ class MultiRobotTrainer:
                             self.robot1.plot_env()
                         if self.robot2.plot:
                             self.robot2.plot_env()
-                            
-                # if steps < 1500:
-                #     total_reward += REWARD_CONFIG['completion_reward']
                 
                 # 計算重疊區域
                 overlap_ratio = self.map_tracker.calculate_overlap()
@@ -400,6 +634,9 @@ class MultiRobotTrainer:
                 if (episode + 1) % save_freq == 0:
                     self.save_checkpoint(episode + 1)
                     self.plot_training_progress()
+                    
+                    # 保存覆蓋率隨時間變化的圖表
+                    self.map_tracker.plot_coverage_over_time()
                 
                 # 更新探索率
                 if self.epsilon > self.epsilon_min:
@@ -444,6 +681,9 @@ class MultiRobotTrainer:
             if hasattr(self.robot2, 'cleanup_visualization'):
                 self.robot2.cleanup_visualization()
             self.map_tracker.cleanup()
+    
+    
+    
     
     def plot_training_progress(self):
         """繪製訓練進度圖"""
@@ -574,3 +814,60 @@ class MultiRobotTrainer:
             json.dump(history_to_save, f, indent=4)
         
         print(f"已在第 {episode} 輪保存檢查點")
+
+    
+    def choose_new_target_with_coordination(self, robot, other_robot, frontiers):
+        """
+        為單個機器人選擇新目標，同時考慮另一個機器人的當前目標
+        
+        Args:
+            robot: 需要選擇新目標的機器人
+            other_robot: 另一個機器人
+            frontiers: 可用的前沿點列表
+        
+        Returns:
+            選擇的目標前沿點
+        """
+        if len(frontiers) == 0:
+            return None
+        
+        # 獲取當前機器人的狀態
+        robot_pos = robot.get_normalized_position()
+        robot_target = None if robot.current_target_frontier is None else self.get_normalized_target(robot.current_target_frontier)
+        
+        # 獲取另一個機器人的狀態
+        other_pos = other_robot.get_normalized_position()
+        other_target = None if other_robot.current_target_frontier is None else self.get_normalized_target(other_robot.current_target_frontier)
+        
+        # 使用模型預測
+        predictions = self.model.predict(
+            np.expand_dims(robot.get_observation(), 0),
+            np.expand_dims(self.pad_frontiers(frontiers), 0),
+            np.expand_dims(robot_pos, 0),
+            np.expand_dims(other_pos, 0),
+            np.expand_dims(robot_target if robot_target is not None else np.zeros(2), 0),
+            np.expand_dims(other_target if other_target is not None else np.zeros(2), 0)
+        )
+        
+        # 提取當前機器人的Q值
+        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+        if robot == self.robot1:
+            q_values = predictions['robot1'][0, :valid_frontiers].copy()
+        else:
+            q_values = predictions['robot2'][0, :valid_frontiers].copy()
+        
+        # 協調選擇：避免與另一個機器人選擇相近的目標
+        MIN_TARGET_DISTANCE = robot.sensor_range * 1.5
+        
+        # 檢查另一個機器人是否有目標，如果有則調整Q值
+        if other_robot.current_target_frontier is not None:
+            for i in range(valid_frontiers):
+                distance = np.linalg.norm(frontiers[i] - other_robot.current_target_frontier)
+                if distance < MIN_TARGET_DISTANCE:
+                    # 使用距離相關的懲罰因子
+                    penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
+                    q_values[i] *= (1.0 - penalty * 0.9)
+        
+        # 選擇最優的動作
+        action = np.argmax(q_values)
+        return frontiers[action]

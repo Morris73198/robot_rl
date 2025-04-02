@@ -453,15 +453,18 @@ class MultiRobotNetworkModel:
         
         return model
         
-    def _huber_loss(self, y_true, y_pred, delta=1.0):
-        """自定義的 Huber 損失函數"""
-        error = y_true - y_pred
-        is_small_error = tf.abs(error) <= delta
-        squared_loss = 0.5 * tf.square(error)
-        linear_loss = delta * tf.abs(error) - 0.5 * tf.square(delta)
-        return tf.reduce_mean(
-            tf.where(is_small_error, squared_loss, linear_loss)
-        )
+    # def _huber_loss(self, y_true, y_pred, delta=1.0):
+    #     """自定義的 Huber 損失函數"""
+    #     error = y_true - y_pred
+    #     is_small_error = tf.abs(error) <= delta
+    #     squared_loss = 0.5 * tf.square(error)
+    #     linear_loss = delta * tf.abs(error) - 0.5 * tf.square(delta)
+    #     return tf.reduce_mean(
+    #         tf.where(is_small_error, squared_loss, linear_loss)
+    #     )
+    
+    def _huber_loss(self, y_true, y_pred):
+        return tf.keras.losses.Huber(delta=1.0)(y_true, y_pred)
 
     def update_target_model(self):
         """更新目標網路"""
