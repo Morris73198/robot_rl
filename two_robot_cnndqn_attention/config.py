@@ -9,9 +9,9 @@ MODEL_DIR = os.path.join(BASE_DIR, 'saved_models')
 MODEL_CONFIG = {
     'input_shape': (84, 84, 1),      # 輸入影像的形狀
     'max_frontiers': 50,            # 最大前沿點數量，需與動作空間大小匹配
-    'memory_size': 10000,            # 經驗回放緩衝區大小
+    'memory_size': 20000,            # 經驗回放緩衝區大小
     'batch_size': 32,                # 訓練批次大小
-    'gamma': 0.99,                   # 獎勵折扣因子
+    'gamma': 0.98,                   # 獎勵折扣因子
     'epsilon_min': 0.01,              # 最小探索率
     'epsilon_decay': 0.995           # 探索率衰減係數
 }

@@ -13,7 +13,7 @@ plt.ion()
 def main():
     try:
         # 指定模型路徑
-        model_path = os.path.join(MODEL_DIR, 'multi_robot_model_attention_ep000420.h5')
+        model_path = os.path.join(MODEL_DIR, 'best0111.h5')
         # model_path = os.path.join(MODEL_DIR, 'xxx')
         
         # 創建模型
@@ -55,9 +55,9 @@ def main():
         )
         
         # 手動調整 epsilon 相關參數
-        trainer.epsilon = 0.4          # 設置當前的 epsilon 值 (探索率)
+        trainer.epsilon = 0.35          # 設置當前的 epsilon 值 (探索率)
         trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
-        trainer.epsilon_decay = 0.9975 # 設置 epsilon 衰減率
+        trainer.epsilon_decay = 0.9995 # 設置 epsilon 衰減率
         
         # 確保模型保存目錄存在
         if not os.path.exists(MODEL_DIR):

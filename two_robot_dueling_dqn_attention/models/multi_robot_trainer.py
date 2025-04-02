@@ -526,9 +526,14 @@ class MultiRobotTrainer:
                             distance = np.linalg.norm(frontiers[i] - robot1_target_point)
                             if distance < MIN_TARGET_DISTANCE:
                                 # 使用距離相關的懲罰因子
-                                penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
-                                robot2_q[i] *= (1.0 - penalty * 0.9)
-                        
+                                penalty = (1.0 - (distance / MIN_TARGET_DISTANCE)) * 0.9
+                                
+                                # 根據Q值符號選擇適當懲罰方式
+                                if robot2_q[i] >= 0:
+                                    robot2_q[i] *= (1.0 - penalty)  # 正值：乘以小於1的數使其變小
+                                else:
+                                    robot2_q[i] *= (1.0 + penalty)  # 負值：乘以大於1的數使其更負
+
                         robot2_action = np.argmax(robot2_q)
                     
                     # 設置目標並執行移動
@@ -554,9 +559,14 @@ class MultiRobotTrainer:
                                 for i in range(valid_frontiers):
                                     distance = np.linalg.norm(frontiers[i] - robot1_target_point)
                                     if distance < MIN_TARGET_DISTANCE:
-                                        penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
-                                        adjusted_robot2_q[i] *= (1.0 - penalty * 0.9)
-                                
+                                        penalty = (1.0 - (distance / MIN_TARGET_DISTANCE)) * 0.9
+                                        
+                                        # 根據Q值符號選擇適當懲罰方式
+                                        if adjusted_robot2_q[i] >= 0:
+                                            adjusted_robot2_q[i] *= (1.0 - penalty)  # 正值：乘以小於1的數使其變小
+                                        else:
+                                            adjusted_robot2_q[i] *= (1.0 + penalty)  # 負值：乘以大於1的數使其更負
+                                        
                                 new_robot2_action = np.argmax(adjusted_robot2_q)
                                 robot2_target_point = frontiers[new_robot2_action]
                             else:
