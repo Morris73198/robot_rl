@@ -2,8 +2,11 @@ import os
 import sys
 from two_robot_a2c.models.multi_robot_network import MultiRobotACModel
 from two_robot_a2c.models.multi_robot_trainer import MultiRobotACTrainer
-from two_robot_a2c.environment.multi_robot import Robot
+from two_robot_a2c.environment.multi_robot_no_unknown import Robot
 from two_robot_a2c.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
+
+from two_robot_a2c_enhance.environment.robot_local_map_tracker import RobotIndividualMapTracker
+
 
 import matplotlib
 import matplotlib.pyplot as plt
