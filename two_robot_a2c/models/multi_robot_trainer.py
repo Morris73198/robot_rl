@@ -5,7 +5,7 @@ from collections import deque
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import json
-from two_robot_a2c_enhance.config import MODEL_DIR, ROBOT_CONFIG
+from two_robot_a2c.config import MODEL_DIR, ROBOT_CONFIG
 
 class MultiRobotACTrainer:
     def __init__(self, model, robot1, robot2, gamma=0.99, gae_lambda=0.95):
