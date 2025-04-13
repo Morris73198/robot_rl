@@ -27,13 +27,13 @@ TRAIN_CONFIG = {
 # 機器人配置
 ROBOT_CONFIG = {
     # 基礎配置
-    'sensor_range': 80,              # 感測器範圍
+    'sensor_range': 50,              # 感測器範圍
     'robot_size': 2,                 # 機器人尺寸
     'local_size': 40,                # 局部地圖大小
     'finish_percent': 0.995,         # 探索完成閾值
     
     # 移動優化配置
-    'movement_step': 2,              # 基本移動步長
+    'movement_step': 5,              # 基本移動步長
     'max_frontier_skip': 3,          # 每次跳過的路徑點數
     'path_simplification': 0.1,      # 路徑簡化閾值
     'min_frontier_dist': 30,         # 最小前沿點選擇距離
@@ -49,8 +49,8 @@ ROBOT_CONFIG = {
 
 # 獎勵函數配置
 REWARD_CONFIG = {
-    'exploration_weight': 2.0,       # 探索獎勵權重
-    'movement_penalty': -1.5,   # 移動懲罰
+    'exploration_weight': 100.0,       # 探索獎勵權重
+    'movement_penalty': -0.5,   # 移動懲罰
     'collision_penalty': -0.0005,     # 碰撞懲罰
     # 'target_completion_reward': 5.0,  # 目標完成獎勵（已註釋）
     # 'completion_reward': 10.0        # 探索完成獎勵

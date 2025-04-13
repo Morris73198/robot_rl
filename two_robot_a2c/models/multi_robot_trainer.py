@@ -5,7 +5,7 @@ from collections import deque
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import json
-from two_robot_a2c.config import MODEL_DIR, ROBOT_CONFIG
+from two_robot_a2c_enhance.config import MODEL_DIR, ROBOT_CONFIG
 
 class MultiRobotACTrainer:
     def __init__(self, model, robot1, robot2, gamma=0.99, gae_lambda=0.95):
@@ -25,7 +25,8 @@ class MultiRobotACTrainer:
             'critic_losses': [],
             'robot1_rewards': [],
             'robot2_rewards': [],
-            'exploration_progress': []
+            'exploration_progress': [],
+            'overlap_ratios': []  # 新增: 記錄機器人探索區域的交集比例
         }
         
         # 添加收斂檢查相關的參數
@@ -35,6 +36,9 @@ class MultiRobotACTrainer:
         self.target_exploration_rate = 0.95  # 目標探索完成率
         # 經驗緩衝區用於儲存當前episode的軌跡
         self.reset_episode_buffer()
+        
+        # 地圖追蹤器（將由 train.py 設置）
+        self.map_tracker = None
 
     def reset_episode_buffer(self):
         """重置episode緩衝區"""
@@ -290,6 +294,10 @@ class MultiRobotACTrainer:
                 robot2_total_reward = 0
                 steps = 0
                 
+                # 初始化或重置地圖追蹤器
+                if self.map_tracker is not None:
+                    self.map_tracker.start_tracking()
+                
                 while not (self.robot1.check_done() or self.robot2.check_done()):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
@@ -336,6 +344,10 @@ class MultiRobotACTrainer:
                     self.robot1.other_robot_position = self.robot2.robot_position.copy()
                     self.robot2.other_robot_position = self.robot1.robot_position.copy()
                     
+                    # 更新地圖追蹤器
+                    if self.map_tracker is not None:
+                        self.map_tracker.update()
+                    
                     # 保存經驗到當前episode緩衝區
                     self.current_episode['states'].append(state)
                     self.current_episode['frontiers'].append(self.pad_frontiers(frontiers))
@@ -366,6 +378,15 @@ class MultiRobotACTrainer:
                         if self.robot2.plot:
                             self.robot2.plot_env()
                 
+                # 計算地圖重疊比例
+                overlap_ratio = 0.0
+                if self.map_tracker is not None:
+                    overlap_ratio = self.map_tracker.calculate_overlap()
+                    self.training_history['overlap_ratios'].append(float(overlap_ratio))
+                    
+                    # 每個訓練回合結束時保存當前地圖
+                    self.map_tracker.save_current_maps(episode)
+                
                 # Episode結束，進行訓練
                 actor_loss, critic_loss = self.train_on_episode()
                 
@@ -387,7 +408,7 @@ class MultiRobotACTrainer:
                     if episode > self.convergence_window * 2:
                         print("\n" + "="*50)
                         print(f"Checking training status at episode {episode + 1}")
-                        # self.check_training_status()
+                        #self.check_training_status()
                         print("="*50)
                 
                 # 列印基本訓練信息
@@ -398,6 +419,8 @@ class MultiRobotACTrainer:
                 print(f"Actor Loss: {float(actor_loss):.6f}")
                 print(f"Critic Loss: {float(critic_loss):.6f}")
                 print(f"Exploration Progress: {exploration_progress:.1%}")
+                # 列印地圖重疊比例
+                print(f"Map Overlap Ratio: {overlap_ratio:.2%}")
                 
                 if exploration_progress >= self.robot1.finish_percent:
                     print("Map Exploration Complete!")
@@ -450,6 +473,11 @@ class MultiRobotACTrainer:
             # 訓練結束後保存最終模型
             self.save_checkpoint(episodes)
             
+            # 訓練結束後生成覆蓋率圖表
+            if self.map_tracker is not None:
+                self.map_tracker.stop_tracking()
+                self.map_tracker.plot_coverage_over_time()
+            
         except Exception as e:
             print(f"Training Error: {str(e)}")
             import traceback
@@ -465,7 +493,10 @@ class MultiRobotACTrainer:
             
     def plot_training_progress(self):
         """繪製訓練進度圖"""
-        fig, axs = plt.subplots(7, 1, figsize=(12, 24))
+        # 決定圖形數量: 如果有重疊率數據, 則需要8個子圖
+        n_plots = 8 if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios'] else 7
+        
+        fig, axs = plt.subplots(n_plots, 1, figsize=(12, n_plots * 3.5))
         
         episodes = range(1, len(self.training_history['episode_rewards']) + 1)
         
@@ -515,6 +546,29 @@ class MultiRobotACTrainer:
         axs[5].set_ylabel('Completion Rate')
         axs[5].grid(True)
         
+        # 如果有重疊率數據，則繪製重疊率圖
+        if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios']:
+            # 確保數據長度與 episodes 一致
+            overlap_data = self.training_history['overlap_ratios']
+            if len(overlap_data) < len(episodes):
+                padded_data = overlap_data + [0.0] * (len(episodes) - len(overlap_data))
+                overlap_data = padded_data[:len(episodes)]
+            elif len(overlap_data) > len(episodes):
+                overlap_data = overlap_data[:len(episodes)]
+                
+            axs[6].plot(episodes, overlap_data, color='#8B008B')  # 使用深紫色
+            axs[6].set_title('Map Overlap Ratio')
+            axs[6].set_xlabel('Episode')
+            axs[6].set_ylabel('Overlap Ratio')
+            axs[6].grid(True)
+            axs[6].set_ylim(0, 1.0)
+        
+        # 繪製探索進度
+        if n_plots > 7:
+            axs[7].plot(episodes, self.training_history['exploration_progress'], color='#2F4F4F')
+        else:
+            axs[6].plot(episodes, self.training_history['exploration_progress'], color='#2F4F4F')
+        
         plt.tight_layout()
         plt.savefig('training_progress.png')
         plt.close()
@@ -536,6 +590,26 @@ class MultiRobotACTrainer:
         plt.grid(True)
         plt.savefig('robots_rewards_comparison.png')
         plt.close()
+        
+        # 如果有重疊率數據，另外繪製一個單獨的重疊率圖
+        if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios']:
+            overlap_data = self.training_history['overlap_ratios']
+            if len(overlap_data) < len(episodes):
+                padded_data = overlap_data + [0.0] * (len(episodes) - len(overlap_data))
+                overlap_data = padded_data[:len(episodes)]
+            elif len(overlap_data) > len(episodes):
+                overlap_data = overlap_data[:len(episodes)]
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(episodes, overlap_data, color='#8B008B', linewidth=2)
+            plt.fill_between(episodes, overlap_data, alpha=0.3, color='#9370DB')
+            plt.title('Map Overlap Ratio Over Episodes')
+            plt.xlabel('Episode')
+            plt.ylabel('Overlap Ratio')
+            plt.ylim(0, 1.0)
+            plt.grid(True)
+            plt.savefig('map_overlap_ratio.png')
+            plt.close()
     
     def save_checkpoint(self, episode):
         """保存檢查點
@@ -561,6 +635,10 @@ class MultiRobotACTrainer:
             'critic_losses': [float(x) for x in self.training_history['critic_losses']],
             'exploration_progress': [float(x) for x in self.training_history['exploration_progress']]
         }
+        
+        # 添加重疊率數據（如果有）
+        if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios']:
+            history_to_save['overlap_ratios'] = [float(x) for x in self.training_history['overlap_ratios']]
         
         with open(history_path, 'w') as f:
             json.dump(history_to_save, f, indent=4)
