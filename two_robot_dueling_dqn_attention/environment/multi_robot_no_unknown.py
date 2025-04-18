@@ -424,9 +424,9 @@ class Robot:
             
             safe_distance = ROBOT_CONFIG['sensor_range'] * 1.5
             if min_distance < safe_distance:
-                other_path_penalty = -5 * np.exp(-min_distance/safe_distance)
+                other_path_penalty = -4 * np.exp(-min_distance/safe_distance)
             else:
-                other_path_penalty = 2.5
+                other_path_penalty = 1
         
         distance_reward = 0
         if self.other_robot_position is not None:
