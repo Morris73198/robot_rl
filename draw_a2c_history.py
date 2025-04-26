@@ -77,8 +77,7 @@ def plot_a2c_training_progress(history, output_dir='./a2c_visualization_results'
     exploration_progress = history['exploration_progress'][:data_length]
     
     # 設置美學風格
-    plt.style.use('seaborn-v0_8-whitegrid')
-    
+    plt.style.use('seaborn-whitegrid')    
     # 1. 繪製總獎勵圖
     plt.figure(figsize=(12, 7))
     plt.plot(episodes, episode_rewards, '-', color='#2E8B57', linewidth=2)
@@ -250,7 +249,7 @@ def plot_a2c_training_progress(history, output_dir='./a2c_visualization_results'
     
     # 機器人獎勵圖
     axs[1].plot(episodes, robot1_rewards, '-', color='#8A2BE2', linewidth=2, label='Robot 1')
-    axs[1].plot(episodes, robot2_rewards, 's-', color='#FFA500', linewidth=2, label='Robot 2')
+    axs[1].plot(episodes, robot2_rewards, '-', color='#FFA500', linewidth=2, label='Robot 2')
     axs[1].set_title('Robot Rewards', fontsize=14)
     axs[1].set_xlabel('Episode', fontsize=12)
     axs[1].set_ylabel('Reward', fontsize=12)
