@@ -1,11 +1,11 @@
 import os
+import tensorflow as tf
+
 import sys
-from two_robot_a2c_enhance.models.multi_robot_network import MultiRobotACModel
-from two_robot_a2c_enhance.models.multi_robot_trainer import MultiRobotACTrainer
+from two_robot_a2c_enhance.models.multi_robot_network import EnhancedMultiRobotA2CModel
+from two_robot_a2c_enhance.models.multi_robot_trainer import EnhancedMultiRobotA2CTrainer
 from two_robot_a2c_enhance.environment.multi_robot_no_unknown import Robot
 from two_robot_a2c_enhance.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
-# 引入 RobotIndividualMapTracker
-from two_robot_a2c_enhance.environment.robot_local_map_tracker import RobotIndividualMapTracker
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -14,139 +14,95 @@ plt.ion()
 
 def main():
     try:
-        # 指定模型路徑（actor和critic分開保存）
-        model_path = os.path.join(MODEL_DIR, 'multi_robot_model_ac')
+        # 指定模型路徑
+        model_path = os.path.join(MODEL_DIR, 'enhanced_multi_robot_model_a2c_latest.h5')
         
-        # 創建模型
-        print("Creating Actor-Critic model...")
-        model = MultiRobotACModel(
-            input_shape=MODEL_CONFIG['input_shape'],
-            max_frontiers=MODEL_CONFIG['max_frontiers']
-        )
-        
-        start_episode = 0
-        
-        # 載入已有的模型（如果存在）
-        if os.path.exists(model_path + '_actor') and os.path.exists(model_path + '_critic'):
-            print(f"Loading existing model from: {model_path}")
+        if os.path.exists(model_path):
+            print(f"正在載入增強型A2C模型: {model_path}")
+            # 創建模型並載入權重
+            model = EnhancedMultiRobotA2CModel(
+                input_shape=MODEL_CONFIG['input_shape'],
+                max_frontiers=MODEL_CONFIG['max_frontiers']
+            )
             model.load(model_path)
-            # 獲取起始episode（從文件名解析）
-            existing_models = [f for f in os.listdir(MODEL_DIR) if f.startswith('multi_robot_model_ac_ep')]
-            if existing_models:
-                latest_ep = max([int(f.split('ep')[-1].split('_')[0]) for f in existing_models])
-                start_episode = latest_ep
-            print(f"Continuing training from episode {start_episode}")
+            
+            # 創建共享環境的兩個機器人
+            print("正在創建機器人...")
+            robot1, robot2 = Robot.create_shared_robots(
+                index_map=0, 
+                train=True, 
+                plot=True
+            )
+            
+            # 創建訓練器
+            print("正在創建增強型A2C訓練器...")
+            trainer = EnhancedMultiRobotA2CTrainer(
+                model=model,
+                robot1=robot1,
+                robot2=robot2,
+                memory_size=MODEL_CONFIG['memory_size'],
+                batch_size=MODEL_CONFIG['batch_size'],
+                gamma=MODEL_CONFIG['gamma']
+            )
+            
+            # 調整探索參數
+            trainer.epsilon = 0.35          # 設置當前的 epsilon 值
+            trainer.epsilon_min = 0.05     # 設置最小 epsilon 值
+            trainer.epsilon_decay = 0.99995  # 設置 epsilon 衰減率
+            
+            print(f"開始訓練增強型A2C模型... (當前 epsilon: {trainer.epsilon})")
+            trainer.train(
+                episodes=TRAIN_CONFIG['episodes'],
+                save_freq=TRAIN_CONFIG['save_freq']
+            )
         else:
-            print(f"No existing model found at {model_path}")
-            print("Starting fresh training...")
-        
-        # 創建共享環境的兩個機器人
-        print("Creating robots with shared environment...")
-        robot1, robot2 = Robot.create_shared_robots(
-            index_map=0, 
-            train=True, 
-            plot=True
-        )
-        
-        # 創建機器人個人地圖追蹤器
-        print("Creating robot individual map tracker...")
-        map_tracker = RobotIndividualMapTracker(
-            robot1=robot1,
-            robot2=robot2,
-            save_dir='robot_individual_maps'
-        )
-        
-        # 創建Actor-Critic訓練器
-        print("Creating Actor-Critic trainer...")
-        trainer = MultiRobotACTrainer(
-            model=model,
-            robot1=robot1,
-            robot2=robot2,
-            gamma=MODEL_CONFIG['gamma'],
-            gae_lambda=0.95  # GAE lambda parameter
-        )
-        
-        # 將地圖追蹤器添加到訓練器中
-        trainer.map_tracker = map_tracker
-        
-        # 修改訓練器的 train 方法以使用地圖追蹤器
-        original_train = trainer.train
-        
-        def train_with_tracker(*args, **kwargs):
-            # 開始追蹤
-            trainer.map_tracker.start_tracking()
+            print(f"在 {model_path} 未找到模型檔案")
+            print("將開始全新訓練增強型A2C模型...")
             
-            # 保存原始的 train_on_episode 方法
-            original_train_on_episode = trainer.train_on_episode
+            print("正在創建增強型A2C模型...")
+            model = EnhancedMultiRobotA2CModel(
+                input_shape=MODEL_CONFIG['input_shape'],
+                max_frontiers=MODEL_CONFIG['max_frontiers']
+            )
+        
+            # 創建共享環境的兩個機器人
+            print("正在創建機器人...")
+            robot1, robot2 = Robot.create_shared_robots(
+                index_map=0, 
+                train=True, 
+                plot=True
+            )
             
-            def train_on_episode_with_tracker():
-                # 獲取交集百分比
-                overlap_ratio = trainer.map_tracker.calculate_overlap()
-                print(f"Episode overlap ratio: {overlap_ratio:.2%}")
+            # 創建訓練器
+            print("正在創建增強型A2C訓練器...")
+            trainer = EnhancedMultiRobotA2CTrainer(
+                model=model,
+                robot1=robot1,
+                robot2=robot2,
+                memory_size=MODEL_CONFIG['memory_size'],
+                batch_size=MODEL_CONFIG['batch_size'],
+                gamma=MODEL_CONFIG['gamma']
+            )
+            
+            # 設置 epsilon 相關參數
+            trainer.epsilon = 1.0           # 設置當前的 epsilon 值 (探索率)
+            trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
+            trainer.epsilon_decay = 0.9985  # 設置 epsilon 衰減率
+            
+            # 確保模型保存目錄存在
+            if not os.path.exists(MODEL_DIR):
+                os.makedirs(MODEL_DIR)
                 
-                # 記錄覆蓋率圖表
-                if hasattr(trainer, 'training_history'):
-                    if 'overlap_ratios' not in trainer.training_history:
-                        trainer.training_history['overlap_ratios'] = []
-                    trainer.training_history['overlap_ratios'].append(float(overlap_ratio))
-                
-                # 調用原始方法
-                return original_train_on_episode()
-            
-            # 替換方法
-            trainer.train_on_episode = train_on_episode_with_tracker
-            
-            # 調用原始的 train 方法
-            result = original_train(*args, **kwargs)
-            
-            # 停止追蹤並生成覆蓋率圖表
-            trainer.map_tracker.stop_tracking()
-            trainer.map_tracker.plot_coverage_over_time()
-            
-            # 恢復原始方法
-            trainer.train_on_episode = original_train_on_episode
-            
-            return result
-        
-        # 替換訓練方法
-        trainer.train = train_with_tracker
-        
-        # 修改訓練循環中的一部分，添加地圖追蹤更新
-        original_reset_episode_buffer = trainer.reset_episode_buffer
-        
-        def reset_episode_buffer_with_tracker():
-            original_reset_episode_buffer()
-            # 初始化或重置地圖追蹤器
-            if hasattr(trainer, 'map_tracker'):
-                trainer.map_tracker.start_tracking()
-        
-        # 替換方法
-        trainer.reset_episode_buffer = reset_episode_buffer_with_tracker
-        
-        # 確保模型保存目錄存在
-        if not os.path.exists(MODEL_DIR):
-            os.makedirs(MODEL_DIR)
-            
-        print("Starting Actor-Critic training with map tracking...")
-        remaining_episodes = max(0, TRAIN_CONFIG['episodes'] - start_episode)
-        
-        # 開始訓練
-        trainer.train(
-            episodes=remaining_episodes,
-            save_freq=TRAIN_CONFIG['save_freq']
-        )
+            print(f"開始訓練增強型A2C模型... (當前 epsilon: {trainer.epsilon})")
+            trainer.train(
+                episodes=TRAIN_CONFIG['episodes'],
+                save_freq=TRAIN_CONFIG['save_freq']
+            )
         
     except Exception as e:
-        print(f"Training error: {str(e)}")
+        print(f"發生錯誤: {str(e)}")
         import traceback
         traceback.print_exc()
-        
-    finally:
-        plt.ioff()
-        plt.close('all')
-        # 確保清理地圖追蹤器資源
-        if 'map_tracker' in locals() and map_tracker is not None:
-            map_tracker.cleanup()
 
 if __name__ == '__main__':
     main()
