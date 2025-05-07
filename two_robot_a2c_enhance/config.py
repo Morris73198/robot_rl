@@ -8,7 +8,7 @@ MODEL_DIR = os.path.join(BASE_DIR, 'saved_models')
 # 模型配置
 MODEL_CONFIG = {
     'input_shape': (84, 84, 1),      # 輸入影像的形狀
-    'max_frontiers': 50,            # 最大前沿點數量，需與動作空間大小匹配
+    'max_frontiers': 50,            # 最大前沿點數量，需與 動作空間大小匹配
     'memory_size': 10000,            # 經驗回放緩衝區大小
     'batch_size': 16,                # 訓練批次大小
     'gamma': 0.99,                   # 獎勵折扣因子

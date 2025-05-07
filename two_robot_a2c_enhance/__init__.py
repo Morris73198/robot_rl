@@ -1,3 +1,2 @@
-from .environment.multi_robot import Robot
-from .models.multi_robot_network import MultiRobotACModel
-from .models.multi_robot_trainer import MultiRobotACTrainer
+from .models.multi_robot_network import EnhancedMultiRobotA2CModel
+from .models.multi_robot_trainer import EnhancedMultiRobotA2CTrainer
