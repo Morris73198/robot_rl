@@ -156,20 +156,8 @@ class MultiRobotA2CTrainer:
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers, dtype=np.float32), np.zeros(self.model.max_frontiers, dtype=np.float32)
         
-        # 使用epsilon-greedy策略來平衡探索與利用
-        if np.random.random() < self.epsilon:
-            # 隨機選擇動作
-            valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-            robot1_action = np.random.randint(valid_frontiers)
-            robot2_action = np.random.randint(valid_frontiers)
-            
-            # 這是隨機選擇，所以我們不需要從模型獲取值，返回0作為佔位符
-            robot1_value = 0.0
-            robot2_value = 0.0
-            robot1_logits = np.zeros(self.model.max_frontiers, dtype=np.float32)
-            robot2_logits = np.zeros(self.model.max_frontiers, dtype=np.float32)
-            
-            return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
+        # 移除 epsilon-greedy 相關代碼
+        # 直接使用模型預測
         
         # 準備輸入
         state_batch = np.expand_dims(state, 0).astype(np.float32)
@@ -193,10 +181,10 @@ class MultiRobotA2CTrainer:
             # 提取策略和價值
             robot1_policy = predictions['robot1_policy'][0]
             robot2_policy = predictions['robot2_policy'][0]
-            robot1_value = float(predictions['robot1_value'][0][0])  # 轉換為Python float
-            robot2_value = float(predictions['robot2_value'][0][0])  # 轉換為Python float
-            robot1_logits = predictions['robot1_logits'][0].astype(np.float32)  # 確保是float32
-            robot2_logits = predictions['robot2_logits'][0].astype(np.float32)  # 確保是float32
+            robot1_value = float(predictions['robot1_value'][0][0])
+            robot2_value = float(predictions['robot2_value'][0][0])
+            robot1_logits = predictions['robot1_logits'][0].astype(np.float32)
+            robot2_logits = predictions['robot2_logits'][0].astype(np.float32)
             
             # 僅考慮有效的前沿點
             valid_frontiers = min(self.model.max_frontiers, len(frontiers))
@@ -206,19 +194,15 @@ class MultiRobotA2CTrainer:
             robot2_probs = robot2_policy[:valid_frontiers]
             
             # 添加安全檢查和數值穩定性處理
-            # 1. 檢查是否有 NaN 或負值
             robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
             robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
             
-            # 2. 確保所有概率值都為正
             robot1_probs = np.maximum(robot1_probs, 1e-10)
             robot2_probs = np.maximum(robot2_probs, 1e-10)
             
-            # 3. 使用更穩定的方式進行歸一化
             robot1_sum = np.sum(robot1_probs)
             robot2_sum = np.sum(robot2_probs)
             
-            # 如果總和接近於零，使用均勻分布
             if robot1_sum < 1e-8:
                 robot1_probs = np.ones(valid_frontiers) / valid_frontiers
             else:
@@ -229,7 +213,6 @@ class MultiRobotA2CTrainer:
             else:
                 robot2_probs = robot2_probs / robot2_sum
             
-            # 最後檢查一次以確保沒有 NaN
             robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
             robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
             
@@ -249,29 +232,23 @@ class MultiRobotA2CTrainer:
                         penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
                         adjusted_policy[i] *= (1.0 - penalty * 0.9)
                 
-                # 再次確保adjusted_policy有效
                 adjusted_policy = np.maximum(adjusted_policy, 1e-10)
                 adjusted_sum = np.sum(adjusted_policy)
                 
                 if adjusted_sum < 1e-8:
-                    # 如果調整後的策略總和接近零，使用均勻分布
                     robot2_action = np.random.randint(valid_frontiers)
                 else:
-                    # 重新歸一化並選擇
                     adjusted_policy = adjusted_policy / adjusted_sum
                     adjusted_policy = np.nan_to_num(adjusted_policy, nan=1.0/valid_frontiers)
                     try:
                         robot2_action = np.random.choice(valid_frontiers, p=adjusted_policy)
                     except ValueError as e:
-                        # 如果仍然出錯，選擇最遠的點
                         distances = np.linalg.norm(frontiers - robot1_target_point, axis=1)
                         robot2_action = np.argmax(distances[:valid_frontiers])
             except ValueError as e:
-                # 如果仍然出錯，記錄詳細信息並退回到確定性選擇
                 print(f"警告：選擇動作時出錯: {str(e)}")
                 print(f"robot1_probs: {robot1_probs}")
                 print(f"robot2_probs: {robot2_probs}")
-                # 確定性地選擇概率最高的動作
                 robot1_action = np.argmax(robot1_probs)
                 robot2_action = np.argmax(robot2_probs)
             
@@ -322,13 +299,19 @@ class MultiRobotA2CTrainer:
             advantages.insert(0, gae)
         
         # 標準化優勢，使訓練更穩定
-        advantages = np.array(advantages, dtype=np.float32)  # 明確指定 float32 類型
-        returns = np.array(returns, dtype=np.float32)        # 明確指定 float32 類型
+        advantages = np.array(advantages, dtype=np.float32)
+        returns = np.array(returns, dtype=np.float32)
         
         if len(advantages) > 1:
-            advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + self.advantage_epsilon)
+            # 使用更穩定的標準化方法
+            adv_mean = np.mean(advantages)
+            adv_std = np.std(advantages)
+            if adv_std < self.advantage_epsilon:
+                adv_std = 1.0  # 避免除以極小值
+            advantages = np.clip((advantages - adv_mean) / adv_std, -3.0, 3.0) 
         
         return returns, advantages
+
     
     def process_trajectory(self, last_robot1_value=0, last_robot2_value=0):
         """處理軌跡數據，計算回報和優勢，並進行訓練"""
@@ -649,10 +632,20 @@ class MultiRobotA2CTrainer:
                 print(f"步數: {steps}, 總獎勵: {total_reward:.2f}")
                 print(f"Robot1 獎勵: {robot1_total_reward:.2f}")
                 print(f"Robot2 獎勵: {robot2_total_reward:.2f}")
-                print(f"探索率: {self.epsilon:.3f}")
+                # print(f"探索率: {self.epsilon:.3f}")
                 print(f"平均損失: {self.training_history['losses'][-1]:.6f}")
+
+                # 添加Actor和Critic損失輸出
+                if 'robot1_policy_loss' in self.training_history and len(self.training_history['robot1_policy_loss']) > 0:
+                    avg_actor_loss = (self.training_history['robot1_policy_loss'][-1] + 
+                                    self.training_history['robot2_policy_loss'][-1]) / 2
+                    avg_critic_loss = (self.training_history['robot1_value_loss'][-1] + 
+                                    self.training_history['robot2_value_loss'][-1]) / 2
+                    print(f"Actor Loss: {avg_actor_loss:.6f}")
+                    print(f"Critic Loss: {avg_critic_loss:.6f}")
+
                 print(f"探索進度: {exploration_progress:.1%}")
-                
+
                 # 印出機器人探索重疊信息
                 print(f"Robot1 探索覆蓋率: {robot1_ratio:.2%}")
                 print(f"Robot2 探索覆蓋率: {robot2_ratio:.2%}")
@@ -778,24 +771,24 @@ class MultiRobotA2CTrainer:
         axs[4].grid(True)
         
         # 繪製探索率（epsilon）
-        if 'exploration_rates' in self.training_history and len(self.training_history['exploration_rates']) >= data_length:
-            exploration_rates = self.training_history['exploration_rates'][:data_length]
-            axs[5].plot(episodes, exploration_rates, color='#228B22')
-            axs[5].set_title('Exploration Rate (Epsilon)')
-        else:
-            axs[5].plot(episodes, [0] * data_length, color='#228B22')
-            axs[5].set_title('Exploration Rate (Not Available)')
+        # if 'exploration_rates' in self.training_history and len(self.training_history['exploration_rates']) >= data_length:
+        #     exploration_rates = self.training_history['exploration_rates'][:data_length]
+        #     axs[5].plot(episodes, exploration_rates, color='#228B22')
+        #     axs[5].set_title('Exploration Rate (Epsilon)')
+        # else:
+        #     axs[5].plot(episodes, [0] * data_length, color='#228B22')
+        #     axs[5].set_title('Exploration Rate (Not Available)')
         
-        axs[5].set_xlabel('Episode')
-        axs[5].set_ylabel('Epsilon')
-        axs[5].grid(True)
+        # axs[5].set_xlabel('Episode')
+        # axs[5].set_ylabel('Epsilon')
+        # axs[5].grid(True)
         
         # 繪製探索進度
-        axs[6].plot(episodes, exploration_progress, color='#2F4F4F')
-        axs[6].set_title('Exploration Progress')
-        axs[6].set_xlabel('Episode')
-        axs[6].set_ylabel('Completion Rate')
-        axs[6].grid(True)
+        axs[5].plot(episodes, exploration_progress, color='#2F4F4F')
+        axs[5].set_title('Exploration Progress')
+        axs[5].set_xlabel('Episode')
+        axs[5].set_ylabel('Completion Rate')
+        axs[5].grid(True)
         
         # 如果有重疊率數據，則繪製重疊率圖
         if n_plots > 7 and hasattr(self, 'overlap_ratios') and len(self.overlap_ratios) > 0:
@@ -810,12 +803,12 @@ class MultiRobotA2CTrainer:
                 # 多餘部分截斷
                 overlap_data = overlap_data[:data_length]
                 
-            axs[7].plot(episodes, overlap_data, color='#8B008B')  # 使用深紫色
-            axs[7].set_title('Map Overlap Ratio')
-            axs[7].set_xlabel('Episode')
-            axs[7].set_ylabel('Overlap Ratio')
-            axs[7].grid(True)
-            axs[7].set_ylim(0, 1.0)
+            axs[6].plot(episodes, overlap_data, color='#8B008B')  # 使用深紫色
+            axs[6].set_title('Map Overlap Ratio')
+            axs[6].set_xlabel('Episode')
+            axs[6].set_ylabel('Overlap Ratio')
+            axs[6].grid(True)
+            axs[6].set_ylim(0, 1.0)
         
         plt.tight_layout()
         plt.savefig('training_progress.png')

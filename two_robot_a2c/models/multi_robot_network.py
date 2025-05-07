@@ -206,7 +206,7 @@ class MultiRobotA2CModel:
         self.num_heads = 8  # 注意力頭數
         self.dff = 512  # 前饋網路維度
         self.dropout_rate = 0.1
-        self.entropy_beta = 0.01  # 熵正則化係數
+        self.entropy_beta = 0.00  # 熵正則化係數
         self.value_loss_weight = 0.5  # 價值損失權重
         
         # 構建模型
@@ -446,7 +446,7 @@ class MultiRobotA2CModel:
         return model
         
     def _compute_loss(self, robot_name, actions, advantages, values, old_values, returns, old_logits, logits):
-        """計算A2C損失函數
+        """計算A2C損失函數，根據提供的公式
         
         Args:
             robot_name: 機器人名稱 ('robot1' 或 'robot2')
@@ -476,29 +476,46 @@ class MultiRobotA2CModel:
         # 將動作轉為one-hot編碼
         actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
-        # 計算新舊策略概率
-        new_log_probs = tf.nn.log_softmax(logits, axis=-1)
-        selected_log_probs = tf.reduce_sum(new_log_probs * actions_one_hot, axis=-1)
-        
-        # 策略損失 (Policy Gradient)
-        policy_loss = -tf.reduce_mean(selected_log_probs * advantages)
-        
-        # 價值損失（TD誤差的平方）
-        value_loss = tf.reduce_mean(tf.square(returns - values))
-        
-        # 熵損失 (用於鼓勵探索)
+        # 計算新策略概率和對數概率
         probs = tf.nn.softmax(logits, axis=-1)
-        entropy_loss = -tf.reduce_mean(tf.reduce_sum(probs * new_log_probs, axis=-1))
+        log_probs = tf.math.log(tf.clip_by_value(probs, 1e-10, 1.0))
+        selected_log_probs = tf.reduce_sum(log_probs * actions_one_hot, axis=-1)
         
-        # 總損失
-        total_loss = policy_loss + self.value_loss_weight * value_loss - self.entropy_beta * entropy_loss
+        # 計算策略熵 H(π(s))
+        entropy = -tf.reduce_sum(probs * log_probs, axis=-1)
+        entropy_loss = tf.reduce_mean(entropy)
+        
+        # 根據公式計算 Actor Loss:
+        # L_actor = -log π(a|s) · A(s,a) - α · H(π(s))
+        # 使用 α = 0.005 作為熵係數
+        actor_loss = -tf.reduce_mean(selected_log_probs * advantages)
+        policy_loss = actor_loss - 0.005 * entropy_loss  # 使用0.005作為熵係數
+        
+        # 計算 Critic Loss，使用 Huber Loss
+        # L_critic = Huber(R - V(s))
+        delta = returns - values
+        abs_delta = tf.abs(delta)
+        quadratic = tf.minimum(abs_delta, 1.0)
+        linear = abs_delta - quadratic
+        value_loss = tf.reduce_mean(0.5 * tf.square(quadratic) + linear)
+        
+        # 總損失是 Actor Loss 和 Critic Loss 的總和
+        # 由於在外部已經加總兩個機器人的損失，這裡只計算單個機器人的損失
+        total_loss = policy_loss + value_loss
         
         return total_loss, policy_loss, value_loss, entropy_loss
     
     def _create_train_function(self):
         """創建訓練函數"""
         # 創建優化器
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.0003)
+        initial_learning_rate = 0.00005  # 降低初始學習率
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate,
+            decay_steps=1000,
+            decay_rate=0.95,
+            staircase=True
+        )
+        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
         
         @tf.function
         def train_step(states, frontiers, robot1_pos, robot2_pos, 
@@ -564,8 +581,13 @@ class MultiRobotA2CModel:
                 
             # 計算梯度並應用
             gradients = tape.gradient(total_loss, self.model.trainable_variables)
-            # 梯度裁剪，防止梯度爆炸
-            gradients, _ = tf.clip_by_global_norm(gradients, 0.5)
+    
+            # 計算梯度範數
+            global_norm = tf.linalg.global_norm(gradients)
+            
+            # 更保守的梯度裁剪
+            gradients, _ = tf.clip_by_global_norm(gradients, 0.5)  # 從0.5降低到1.0
+            
             optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
             
             return {
@@ -577,7 +599,8 @@ class MultiRobotA2CModel:
                 'robot2_loss': robot2_loss,
                 'robot2_policy_loss': robot2_policy_loss,
                 'robot2_value_loss': robot2_value_loss,
-                'robot2_entropy': robot2_entropy
+                'robot2_entropy': robot2_entropy,
+                'gradient_norm': global_norm  # 添加梯度範數監控
             }
             
         self.train_step = train_step
