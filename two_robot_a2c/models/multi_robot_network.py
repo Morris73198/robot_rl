@@ -446,62 +446,45 @@ class MultiRobotA2CModel:
         return model
         
     def _compute_loss(self, robot_name, actions, advantages, values, old_values, returns, old_logits, logits):
-        """計算A2C損失函數，根據提供的公式
-        
-        Args:
-            robot_name: 機器人名稱 ('robot1' 或 'robot2')
-            actions: 選擇的動作索引
-            advantages: 優勢函數值
-            values: 新的價值估計
-            old_values: 舊的價值估計
-            returns: 折現回報
-            old_logits: 舊的策略logits
-            logits: 新的策略logits
-            
-        Returns:
-            total_loss: 總損失
-            policy_loss: 策略損失
-            value_loss: 價值損失
-            entropy_loss: 熵損失
-        """
-        # 確保數據類型一致 - 將所有輸入轉換為float32
+        """計算A2C損失函數，保持參數結構不變但內部實現優化"""
+        # 確保數據類型一致
         actions = tf.cast(actions, tf.int32)
         advantages = tf.cast(advantages, tf.float32)
         values = tf.cast(values, tf.float32)
-        old_values = tf.cast(old_values, tf.float32)
+        old_values = tf.cast(old_values, tf.float32)  # 保留但不使用
         returns = tf.cast(returns, tf.float32)
-        old_logits = tf.cast(old_logits, tf.float32)
+        old_logits = tf.cast(old_logits, tf.float32)  # 保留但不使用
         logits = tf.cast(logits, tf.float32)
         
         # 將動作轉為one-hot編碼
         actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
-        # 計算新策略概率和對數概率
+        # 計算策略概率和對數概率
         probs = tf.nn.softmax(logits, axis=-1)
         log_probs = tf.math.log(tf.clip_by_value(probs, 1e-10, 1.0))
         selected_log_probs = tf.reduce_sum(log_probs * actions_one_hot, axis=-1)
         
-        # 計算策略熵 H(π(s))
+        # 計算策略熵
         entropy = -tf.reduce_sum(probs * log_probs, axis=-1)
         entropy_loss = tf.reduce_mean(entropy)
         
-        # 根據公式計算 Actor Loss:
-        # L_actor = -log π(a|s) · A(s,a) - α · H(π(s))
-        # 使用 α = 0.005 作為熵係數
+        # 策略損失 (Actor Loss)
         actor_loss = -tf.reduce_mean(selected_log_probs * advantages)
-        policy_loss = actor_loss - 0.005 * entropy_loss  # 使用0.005作為熵係數
         
-        # 計算 Critic Loss，使用 Huber Loss
-        # L_critic = Huber(R - V(s))
+        # 添加熵正則化
+        entropy_coef = 0.05  # 增加熵係數以鼓勵探索
+        policy_loss = actor_loss - entropy_coef * entropy_loss
+        
+        # 價值損失 (Critic Loss)
+        # 使用 Huber 損失
         delta = returns - values
         abs_delta = tf.abs(delta)
         quadratic = tf.minimum(abs_delta, 1.0)
         linear = abs_delta - quadratic
         value_loss = tf.reduce_mean(0.5 * tf.square(quadratic) + linear)
         
-        # 總損失是 Actor Loss 和 Critic Loss 的總和
-        # 由於在外部已經加總兩個機器人的損失，這裡只計算單個機器人的損失
-        total_loss = policy_loss + value_loss
+        # 總損失，調整權重
+        total_loss = policy_loss + 0.5 * value_loss  # 減少價值損失的權重
         
         return total_loss, policy_loss, value_loss, entropy_loss
     
@@ -586,7 +569,7 @@ class MultiRobotA2CModel:
             global_norm = tf.linalg.global_norm(gradients)
             
             # 更保守的梯度裁剪
-            gradients, _ = tf.clip_by_global_norm(gradients, 0.5)  # 從0.5降低到1.0
+            gradients, _ = tf.clip_by_global_norm(gradients, 1.0)  
             
             optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
             
