@@ -10,10 +10,10 @@ from two_robot_a2c_enhance.environment.robot_local_map_tracker import RobotIndiv
 
 class EnhancedMultiRobotA2CTrainer:
     def __init__(self, model, robot1, robot2, memory_size=10000, batch_size=16, gamma=0.99):
-        """初始化多機器人A2C訓練器
+        """初始化增強版多機器人A2C訓練器
         
         Args:
-            model: 增強型A2C模型
+            model: 增強版A2C模型
             robot1: 第一個機器人實例
             robot2: 第二個機器人實例
             memory_size: 經驗回放緩衝區大小
@@ -26,15 +26,16 @@ class EnhancedMultiRobotA2CTrainer:
         self.memory = deque(maxlen=memory_size)
         self.batch_size = batch_size
         self.gamma = gamma
+        self.gae_lambda = 0.95
         
         self.map_size = self.robot1.map_size
         
         # 訓練參數
-        self.epsilon = 1.0  # 探索率 (用於動作選擇)
+        self.epsilon = 1.0  # 探索率
         self.epsilon_min = 0.1  # 最小探索率
         self.epsilon_decay = 0.995  # 探索率衰減
 
-        # 記錄重疊率
+        # 追蹤探索效率
         self.overlap_ratios = []
         
         # 訓練歷史記錄
@@ -51,12 +52,15 @@ class EnhancedMultiRobotA2CTrainer:
             'robot1_value_loss': [],
             'robot2_value_loss': [],
             'robot1_policy_loss': [],
-            'robot2_policy_loss': [],
-            'map_overlap_ratio': []  # 新增：地圖重疊率記錄
+            'robot2_policy_loss': []
         }
         
         # 創建機器人個人地圖追蹤器
         self.map_tracker = RobotIndividualMapTracker(robot1, robot2)
+        
+        # 為每個機器人保存一個軌跡歷史
+        self.robot1_trajectory_history = []
+        self.robot2_trajectory_history = []
         
         # 優勢函數計算的標準化參數
         self.advantage_epsilon = 1e-8
@@ -150,9 +154,9 @@ class EnhancedMultiRobotA2CTrainer:
     
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target):
-        """為兩個機器人選擇動作，使用A2C策略網絡"""
+        """選擇動作，考慮機器人協作"""
         if len(frontiers) == 0:
-            return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers, dtype=np.float32), np.zeros(self.model.max_frontiers, dtype=np.float32)
+            return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
         # 準備輸入
         state_batch = np.expand_dims(state, 0).astype(np.float32)
@@ -178,129 +182,112 @@ class EnhancedMultiRobotA2CTrainer:
             robot2_policy = predictions['robot2_policy'][0]
             robot1_value = float(predictions['robot1_value'][0][0])
             robot2_value = float(predictions['robot2_value'][0][0])
-            robot1_logits = predictions['robot1_logits'][0].astype(np.float32)
-            robot2_logits = predictions['robot2_logits'][0].astype(np.float32)
+            robot1_logits = predictions['robot1_logits'][0]
+            robot2_logits = predictions['robot2_logits'][0]
             
-            # 僅考慮有效的前沿點
+            # 僅考慮有效的frontier點
             valid_frontiers = min(self.model.max_frontiers, len(frontiers))
             
-            # 確保政策概率有效
-            robot1_probs = robot1_policy[:valid_frontiers]
-            robot2_probs = robot2_policy[:valid_frontiers]
-            
-            # 數值穩定性處理
-            robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
-            robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
-            
-            robot1_probs = np.maximum(robot1_probs, 1e-10)
-            robot2_probs = np.maximum(robot2_probs, 1e-10)
-            
-            robot1_sum = np.sum(robot1_probs)
-            robot2_sum = np.sum(robot2_probs)
-            
-            if robot1_sum < 1e-8:
-                robot1_probs = np.ones(valid_frontiers) / valid_frontiers
-            else:
-                robot1_probs = robot1_probs / robot1_sum
-            
-            if robot2_sum < 1e-8:
-                robot2_probs = np.ones(valid_frontiers) / valid_frontiers
-            else:
-                robot2_probs = robot2_probs / robot2_sum
-            
-            # 最後檢查一次以確保沒有 NaN
-            robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
-            robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
-            
-            # 根據策略概率抽樣動作
-            try:
-                robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+            # 探索與利用
+            if np.random.random() < self.epsilon:
+                # 探索 - 隨機選擇
+                robot1_action = np.random.randint(0, valid_frontiers)
+                robot2_action = np.random.randint(0, valid_frontiers)
                 
-                # 協調：讓robot2避開robot1的目標
-                MIN_TARGET_DISTANCE = self.robot1.sensor_range * 1.5
+                # 避免兩個機器人選擇相同或太近的目標
+                min_distance = self.robot1.sensor_range * 1.5
                 robot1_target_point = frontiers[robot1_action]
                 
-                # 為robot2調整概率，使其避開robot1的目標區域
-                adjusted_policy = robot2_probs.copy()
-                for i in range(valid_frontiers):
-                    distance = np.linalg.norm(frontiers[i] - robot1_target_point)
-                    if distance < MIN_TARGET_DISTANCE:
-                        penalty = 1.0 - (distance / MIN_TARGET_DISTANCE)
-                        adjusted_policy[i] *= (1.0 - penalty * 0.9)
+                attempts = 0
+                while attempts < 5:  # 嘗試幾次以找到足夠遠的點
+                    distance = np.linalg.norm(frontiers[robot2_action] - robot1_target_point)
+                    if distance >= min_distance:
+                        break
+                    robot2_action = np.random.randint(0, valid_frontiers)
+                    attempts += 1
+            else:
+                # 利用 - 根據策略選擇
+                # 應用溫度參數使策略更加確定
+                temperature = 1.0  # 溫度參數，可調整
+                robot1_probs = robot1_policy[:valid_frontiers]
+                robot2_probs = robot2_policy[:valid_frontiers]
                 
-                # 再次確保adjusted_policy有效
-                adjusted_policy = np.maximum(adjusted_policy, 1e-10)
-                adjusted_sum = np.sum(adjusted_policy)
+                # 確保概率有效
+                robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
+                robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
                 
-                if adjusted_sum < 1e-8:
-                    # 如果調整後的策略總和接近零，使用均勻分布
-                    robot2_action = np.random.randint(valid_frontiers)
-                else:
-                    # 重新歸一化並選擇
-                    adjusted_policy = adjusted_policy / adjusted_sum
-                    adjusted_policy = np.nan_to_num(adjusted_policy, nan=1.0/valid_frontiers)
-                    try:
-                        robot2_action = np.random.choice(valid_frontiers, p=adjusted_policy)
-                    except ValueError as e:
-                        # 如果仍然出錯，選擇最遠的點
+                robot1_probs = np.maximum(robot1_probs, 1e-6)
+                robot2_probs = np.maximum(robot2_probs, 1e-6)
+                
+                robot1_probs = robot1_probs / np.sum(robot1_probs)
+                robot2_probs = robot2_probs / np.sum(robot2_probs)
+                
+                # 根據策略抽樣動作
+                try:
+                    robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+                    
+                    # 避免兩個機器人選擇相同或相近目標
+                    robot1_target_point = frontiers[robot1_action]
+                    
+                    # 調整 Robot2 的策略以避開 Robot1 的目標
+                    adjusted_probs = robot2_probs.copy()
+                    min_distance = self.robot1.sensor_range * 1.5
+                    
+                    for i in range(valid_frontiers):
+                        distance = np.linalg.norm(frontiers[i] - robot1_target_point)
+                        if distance < min_distance:
+                            # 使用平滑懲罰函數
+                            factor = (distance / min_distance) ** 2
+                            adjusted_probs[i] *= factor
+                    
+                    # 確保概率和為1
+                    adjusted_probs = np.maximum(adjusted_probs, 1e-6)
+                    sum_probs = np.sum(adjusted_probs)
+                    if sum_probs > 0:
+                        adjusted_probs = adjusted_probs / sum_probs
+                        robot2_action = np.random.choice(valid_frontiers, p=adjusted_probs)
+                    else:
+                        # 備用策略：選擇距離 robot1 目標最遠的點
                         distances = np.linalg.norm(frontiers - robot1_target_point, axis=1)
                         robot2_action = np.argmax(distances[:valid_frontiers])
-            except ValueError as e:
-                # 如果出錯，記錄詳細信息並退回到確定性選擇
-                print(f"警告：選擇動作時出錯: {str(e)}")
-                print(f"robot1_probs: {robot1_probs}")
-                print(f"robot2_probs: {robot2_probs}")
-                # 確定性地選擇概率最高的動作
-                robot1_action = np.argmax(robot1_probs)
-                robot2_action = np.argmax(robot2_probs)
+                except ValueError as e:
+                    print(f"Warning: Error in action selection: {str(e)}")
+                    robot1_action = np.argmax(robot1_probs)
+                    robot2_action = np.argmax(robot2_probs)
             
             return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
-            
+                
         except Exception as e:
-            print(f"模型預測出錯：{str(e)}，使用隨機動作")
+            print(f"Model prediction error: {str(e)}, using random actions")
             valid_frontiers = min(self.model.max_frontiers, len(frontiers))
             robot1_action = np.random.randint(valid_frontiers)
             robot2_action = np.random.randint(valid_frontiers)
-            return robot1_action, robot2_action, 0.0, 0.0, np.zeros(self.model.max_frontiers, dtype=np.float32), np.zeros(self.model.max_frontiers, dtype=np.float32)
+            return robot1_action, robot2_action, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
 
     def compute_returns_and_advantages(self, rewards, values, dones, next_value):
-        """計算折現回報和優勢函數
+        """計算折現回報和優勢函數"""
+        returns = np.zeros_like(rewards)
+        advantages = np.zeros_like(rewards)
+        gae = 0
         
-        Args:
-            rewards: 獎勵列表
-            values: 價值預測列表
-            dones: 結束標誌列表
-            next_value: 最後狀態的價值估計
-            
-        Returns:
-            returns: 折現回報列表
-            advantages: 優勢函數列表
-        """
-        returns = []
-        advantages = []
-        gae = 0  # 通用優勢估計 (Generalized Advantage Estimation)
-        
-        # 反向計算回報和優勢
         for t in reversed(range(len(rewards))):
             if t == len(rewards) - 1:
+                # 對於序列的最後一步
                 next_non_terminal = 1.0 - dones[t]
-                next_values = next_value
+                next_val = next_value  # 使用傳入的下一個狀態價值
             else:
                 next_non_terminal = 1.0 - dones[t+1]
-                next_values = values[t+1]
+                next_val = values[t+1]
                 
-            delta = rewards[t] + self.gamma * next_values * next_non_terminal - values[t]
-            gae = delta + self.gamma * 0.95 * next_non_terminal * gae
+            # 使用 GAE 方法計算優勢
+            delta = rewards[t] + self.gamma * next_val * next_non_terminal - values[t]
+            gae = delta + self.gamma * self.gae_lambda * next_non_terminal * gae
+            advantages[t] = gae
+            returns[t] = advantages[t] + values[t]
             
-            returns.insert(0, gae + values[t])
-            advantages.insert(0, gae)
-        
-        # 標準化優勢，使訓練更穩定
-        advantages = np.array(advantages, dtype=np.float32)  # 明確指定 float32 類型
-        returns = np.array(returns, dtype=np.float32)        # 明確指定 float32 類型
-        
+        # 標準化優勢值
         if len(advantages) > 1:
-            advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + self.advantage_epsilon)
+            advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
         
         return returns, advantages
     
@@ -375,11 +362,15 @@ class EnhancedMultiRobotA2CTrainer:
                 steps = 0
                 episode_losses = []
                 
-                # 在循環外定義 MIN_TARGET_DISTANCE，避免未定義錯誤
+                # 設定最小目標距離參數
                 MIN_TARGET_DISTANCE = self.robot1.sensor_range * 1.5
                 
                 # 重置軌跡緩衝區
                 self.reset_trajectory_buffer()
+                
+                # 清空機器人歷史軌跡
+                self.robot1_trajectory_history = []
+                self.robot2_trajectory_history = []
                 
                 # 實際訓練循環
                 while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
@@ -392,6 +383,10 @@ class EnhancedMultiRobotA2CTrainer:
                     robot2_pos = self.robot2.get_normalized_position()
                     old_robot1_pos = self.robot1.robot_position.copy()
                     old_robot2_pos = self.robot2.robot_position.copy()
+                    
+                    # 記錄位置到歷史軌跡
+                    self.robot1_trajectory_history.append(old_robot1_pos.copy())
+                    self.robot2_trajectory_history.append(old_robot2_pos.copy())
                     
                     # 標準化目標位置
                     map_dims = np.array([float(self.robot1.map_size[1]), float(self.robot1.map_size[0])])
@@ -495,14 +490,33 @@ class EnhancedMultiRobotA2CTrainer:
                     # 更新地圖追蹤器
                     self.map_tracker.update()
                     
-                    # 獲取重疊比例並應用獎勵調整
-                    current_overlap = self.map_tracker.calculate_overlap()
-                    # 根據重疊程度調整獎勵
-                    overlap_penalty = -0.5 * current_overlap  # 可以調整係數
-                    
-                    # 加入重疊懲罰到獎勵中
-                    robot1_reward += overlap_penalty
-                    robot2_reward += overlap_penalty
+                    # 計算軌跡重疊懲罰 - 使用歷史軌跡
+                    overlap_penalty = 0.0
+                    if len(self.robot1_trajectory_history) > 10 and len(self.robot2_trajectory_history) > 10:
+                        # 從每個軌跡中取最近的N個點進行比較
+                        recent_points = 50
+                        r1_recent = self.robot1_trajectory_history[-recent_points:] if len(self.robot1_trajectory_history) >= recent_points else self.robot1_trajectory_history
+                        r2_recent = self.robot2_trajectory_history[-recent_points:] if len(self.robot2_trajectory_history) >= recent_points else self.robot2_trajectory_history
+                        
+                        # 計算當前位置與另一個機器人軌跡的最小距離
+                        min_dist_r1_to_r2 = float('inf')
+                        for point in r2_recent:
+                            dist = np.linalg.norm(self.robot1.robot_position - point)
+                            if dist < min_dist_r1_to_r2:
+                                min_dist_r1_to_r2 = dist
+                        
+                        min_dist_r2_to_r1 = float('inf')
+                        for point in r1_recent:
+                            dist = np.linalg.norm(self.robot2.robot_position - point)
+                            if dist < min_dist_r2_to_r1:
+                                min_dist_r2_to_r1 = dist
+                        
+                        # 基於最小距離計算懲罰
+                        safe_distance = self.robot1.sensor_range
+                        if min_dist_r1_to_r2 < safe_distance:
+                            robot1_reward -= 0.2 * (1 - min_dist_r1_to_r2 / safe_distance)
+                        if min_dist_r2_to_r1 < safe_distance:
+                            robot2_reward -= 0.2 * (1 - min_dist_r2_to_r1 / safe_distance)
                     
                     # 為了保持數值穩定性，裁剪獎勵值
                     robot1_reward = np.clip(robot1_reward, -10, 10)
@@ -592,13 +606,12 @@ class EnhancedMultiRobotA2CTrainer:
                         # 重置軌跡緩衝區
                         self.reset_trajectory_buffer()
                 
-                # 計算重疊區域（確保此處代碼在訓練循環外，一個回合結束時執行）
+                # 計算重疊區域（在回合結束時執行）
                 overlap_ratio = self.map_tracker.calculate_overlap()
                 robot1_ratio, robot2_ratio = self.map_tracker.get_exploration_ratio()
                 
-                # 記錄重疊率和覆蓋率
+                # 記錄重疊率
                 self.overlap_ratios.append(overlap_ratio)
-                self.training_history['map_overlap_ratio'].append(overlap_ratio)
                 
                 # 停止追蹤
                 self.map_tracker.stop_tracking()
@@ -628,31 +641,25 @@ class EnhancedMultiRobotA2CTrainer:
                 if self.epsilon > self.epsilon_min:
                     self.epsilon *= self.epsilon_decay
                 
-                # 修改 train 方法中的列印訓練信息部分
-                # 在 print 語句部分添加以下內容
-
                 # 列印訓練信息
                 print(f"\n第 {episode + 1}/{episodes} 輪 (地圖 {self.robot1.li_map})")
                 print(f"步數: {steps}, 總獎勵: {total_reward:.2f}")
                 print(f"Robot1 獎勵: {robot1_total_reward:.2f}")
                 print(f"Robot2 獎勵: {robot2_total_reward:.2f}")
-                # print(f"探索率: {self.epsilon:.3f}")
+                print(f"探索率: {self.epsilon:.3f}")
                 print(f"平均損失: {self.training_history['losses'][-1]:.6f}")
 
-                # 添加 Actor 損失和 Critic 損失的輸出
+                # 添加Actor和Critic損失輸出
                 if 'robot1_policy_loss' in self.training_history and len(self.training_history['robot1_policy_loss']) > 0:
-                    r1_policy_loss = self.training_history['robot1_policy_loss'][-1]
-                    r2_policy_loss = self.training_history['robot2_policy_loss'][-1]
-                    avg_policy_loss = (r1_policy_loss + r2_policy_loss) / 2
-                    print(f"Actor Loss: {avg_policy_loss:.6f}")
-                    
-                if 'robot1_value_loss' in self.training_history and len(self.training_history['robot1_value_loss']) > 0:
-                    r1_value_loss = self.training_history['robot1_value_loss'][-1]
-                    r2_value_loss = self.training_history['robot2_value_loss'][-1]
-                    avg_value_loss = (r1_value_loss + r2_value_loss) / 2
-                    print(f"Critic Loss: {avg_value_loss:.6f}")
+                    avg_actor_loss = (self.training_history['robot1_policy_loss'][-1] + 
+                                    self.training_history['robot2_policy_loss'][-1]) / 2
+                    avg_critic_loss = (self.training_history['robot1_value_loss'][-1] + 
+                                    self.training_history['robot2_value_loss'][-1]) / 2
+                    print(f"Actor Loss: {avg_actor_loss:.6f}")
+                    print(f"Critic Loss: {avg_critic_loss:.6f}")
 
                 print(f"探索進度: {exploration_progress:.1%}")
+
                 # 印出機器人探索重疊信息
                 print(f"Robot1 探索覆蓋率: {robot1_ratio:.2%}")
                 print(f"Robot2 探索覆蓋率: {robot2_ratio:.2%}")
@@ -686,9 +693,10 @@ class EnhancedMultiRobotA2CTrainer:
     
     def plot_training_progress(self):
         """繪製訓練進度圖"""
-        # 決定圖形數量: 總共9個子圖，加入地圖重疊率
-        n_plots = 9
-        
+        # 檢查是否有重疊率數據
+        has_overlap_data = hasattr(self, 'overlap_ratios') and len(self.overlap_ratios) > 0
+        n_plots = 7 if has_overlap_data else 6
+
         fig, axs = plt.subplots(n_plots, 1, figsize=(12, n_plots * 3.5))
         
         # 確保所有資料的長度一致
@@ -698,17 +706,11 @@ class EnhancedMultiRobotA2CTrainer:
             len(self.training_history['robot2_rewards']),
             len(self.training_history['episode_lengths']),
             len(self.training_history['losses']),
-            len(self.training_history['exploration_progress']),
-            len(self.training_history['map_overlap_ratio'])
+            len(self.training_history['exploration_progress'])
         )
-        
-        if data_length == 0:
-            print("沒有足夠的訓練數據進行繪圖")
-            plt.close(fig)
-            return
-        
+
         episodes = range(1, data_length + 1)
-        
+
         # 裁剪所有資料到相同長度
         episode_rewards = self.training_history['episode_rewards'][:data_length]
         robot1_rewards = self.training_history['robot1_rewards'][:data_length]
@@ -716,159 +718,116 @@ class EnhancedMultiRobotA2CTrainer:
         episode_lengths = self.training_history['episode_lengths'][:data_length]
         losses = self.training_history['losses'][:data_length]
         exploration_progress = self.training_history['exploration_progress'][:data_length]
-        map_overlap_ratio = self.training_history['map_overlap_ratio'][:data_length]
-        
+
         # 繪製總獎勵
         axs[0].plot(episodes, episode_rewards, color='#2E8B57')
         axs[0].set_title('Total Reward')
         axs[0].set_xlabel('Episode')
         axs[0].set_ylabel('Reward')
         axs[0].grid(True)
-        
+
         # 繪製各機器人獎勵
-        axs[1].plot(episodes, robot1_rewards, 
-                    color='#8A2BE2', label='Robot1')
-        axs[1].plot(episodes, robot2_rewards, 
-                    color='#FFA500', label='Robot2')
+        axs[1].plot(episodes, robot1_rewards, color='#8A2BE2', label='Robot1')
+        axs[1].plot(episodes, robot2_rewards, color='#FFA500', label='Robot2')
         axs[1].set_title('Reward per Robot')
         axs[1].set_xlabel('Episode')
         axs[1].set_ylabel('Reward')
         axs[1].legend()
         axs[1].grid(True)
-        
+
         # 繪製步數
         axs[2].plot(episodes, episode_lengths, color='#4169E1')
         axs[2].set_title('Steps per Episode')
         axs[2].set_xlabel('Episode')
         axs[2].set_ylabel('Steps')
         axs[2].grid(True)
-        
-        # 繪製Actor損失 (如果有)
+
+        # 繪製Actor損失（若有）
         if 'robot1_policy_loss' in self.training_history and len(self.training_history['robot1_policy_loss']) >= data_length:
-            # 提取並裁剪 Actor 損失資料
             robot1_policy_loss = self.training_history['robot1_policy_loss'][:data_length]
             robot2_policy_loss = self.training_history['robot2_policy_loss'][:data_length]
-            
-            # 繪製每個機器人的 Actor 損失
-            axs[3].plot(episodes, robot1_policy_loss, 
-                       color='#DC143C', label='Robot1 Policy Loss')
-            axs[3].plot(episodes, robot2_policy_loss, 
-                       color='#B22222', label='Robot2 Policy Loss')
+            actor_losses = [(r1 + r2) / 2 for r1, r2 in zip(robot1_policy_loss, robot2_policy_loss)]
+            axs[3].plot(episodes, actor_losses, color='#DC143C')
             axs[3].set_title('Actor Loss')
-            axs[3].legend()
         else:
             axs[3].plot(episodes, losses, color='#DC143C')
             axs[3].set_title('Training Loss')
-        
         axs[3].set_xlabel('Episode')
         axs[3].set_ylabel('Loss')
         axs[3].grid(True)
-        
-        # 繪製Critic損失 (如果有)
+
+        # 繪製Critic損失（若有）
         if 'robot1_value_loss' in self.training_history and len(self.training_history['robot1_value_loss']) >= data_length:
-            # 提取並裁剪 Critic 損失資料
             robot1_value_loss = self.training_history['robot1_value_loss'][:data_length]
             robot2_value_loss = self.training_history['robot2_value_loss'][:data_length]
-            
-            # 繪製每個機器人的 Critic 損失
-            axs[4].plot(episodes, robot1_value_loss, 
-                      color='#2F4F4F', label='Robot1 Value Loss')
-            axs[4].plot(episodes, robot2_value_loss, 
-                      color='#696969', label='Robot2 Value Loss')
+            critic_losses = [(r1 + r2) / 2 for r1, r2 in zip(robot1_value_loss, robot2_value_loss)]
+            axs[4].plot(episodes, critic_losses, color='#2F4F4F')
             axs[4].set_title('Critic Loss')
-            axs[4].legend()
         else:
             axs[4].plot(episodes, [0] * data_length, color='#2F4F4F')
             axs[4].set_title('Critic Loss (Not Available)')
-        
         axs[4].set_xlabel('Episode')
         axs[4].set_ylabel('Loss')
         axs[4].grid(True)
-        
-        # 繪製熵 (如果有)
-        if 'robot1_entropy' in self.training_history and len(self.training_history['robot1_entropy']) >= data_length:
-            # 提取並裁剪熵資料
-            robot1_entropy = self.training_history['robot1_entropy'][:data_length]
-            robot2_entropy = self.training_history['robot2_entropy'][:data_length]
-            
-            # 繪製每個機器人的熵
-            axs[5].plot(episodes, robot1_entropy, 
-                      color='#228B22', label='Robot1 Entropy')
-            axs[5].plot(episodes, robot2_entropy, 
-                      color='#32CD32', label='Robot2 Entropy')
-            axs[5].set_title('Policy Entropy')
-            axs[5].legend()
-        else:
-            axs[5].plot(episodes, [0] * data_length, color='#228B22')
-            axs[5].set_title('Policy Entropy (Not Available)')
-        
-        axs[5].set_xlabel('Episode')
-        axs[5].set_ylabel('Entropy')
-        axs[5].grid(True)
-        
-        # 繪製探索率（epsilon）
-        # if 'exploration_rates' in self.training_history and len(self.training_history['exploration_rates']) >= data_length:
-        #     exploration_rates = self.training_history['exploration_rates'][:data_length]
-        #     axs[6].plot(episodes, exploration_rates, color='#8B008B')
-        #     axs[6].set_title('Exploration Rate (Epsilon)')
-        # else:
-        #     axs[6].plot(episodes, [0] * data_length, color='#8B008B')
-        #     axs[6].set_title('Exploration Rate (Not Available)')
-        
-        # axs[6].set_xlabel('Episode')
-        # axs[6].set_ylabel('Epsilon')
-        # axs[6].grid(True)
-        
+
         # 繪製探索進度
-        axs[6].plot(episodes, exploration_progress, color='#FF6347')
-        axs[6].set_title('Exploration Progress')
-        axs[6].set_xlabel('Episode')
-        axs[6].set_ylabel('Completion Rate')
-        axs[6].grid(True)
-        
-        # 繪製地圖重疊率
-        axs[7].plot(episodes, map_overlap_ratio, color='#1E90FF')
-        axs[7].set_title('Map Overlap Ratio')
-        axs[7].set_xlabel('Episode')
-        axs[7].set_ylabel('Overlap Ratio')
-        axs[7].set_ylim(0, 1.0)
-        axs[7].grid(True)
-        
+        axs[5].plot(episodes, exploration_progress, color='#2F4F4F')
+        axs[5].set_title('Exploration Progress')
+        axs[5].set_xlabel('Episode')
+        axs[5].set_ylabel('Completion Rate')
+        axs[5].grid(True)
+
+        # 繪製重疊率（如果有）
+        if has_overlap_data:
+            overlap_data = self.overlap_ratios.copy()
+            if len(overlap_data) < data_length:
+                overlap_data += [0.0] * (data_length - len(overlap_data))
+            elif len(overlap_data) > data_length:
+                overlap_data = overlap_data[:data_length]
+            axs[6].plot(episodes, overlap_data, color='#8B008B')
+            axs[6].set_title('Map Overlap Ratio')
+            axs[6].set_xlabel('Episode')
+            axs[6].set_ylabel('Overlap Ratio')
+            axs[6].grid(True)
+            axs[6].set_ylim(0, 1.0)
+
         plt.tight_layout()
-        plt.savefig('enhanced_training_progress.png')
+        plt.savefig('training_progress.png')
         plt.close()
-        
-        # 另外繪製一個單獨的兩機器人獎勵對比圖
+
+        # 額外繪製兩機器人獎勵對比圖
         plt.figure(figsize=(10, 6))
-        plt.plot(episodes, robot1_rewards, 
-                color='#8A2BE2', label='Robot1', alpha=0.7)
-        plt.plot(episodes, robot2_rewards, 
-                color='#FFA500', label='Robot2', alpha=0.7)
-        plt.fill_between(episodes, robot1_rewards, 
-                        alpha=0.3, color='#9370DB')
-        plt.fill_between(episodes, robot2_rewards, 
-                        alpha=0.3, color='#FFB84D')
+        plt.plot(episodes, robot1_rewards, color='#8A2BE2', label='Robot1', alpha=0.7)
+        plt.plot(episodes, robot2_rewards, color='#FFA500', label='Robot2', alpha=0.7)
+        plt.fill_between(episodes, robot1_rewards, alpha=0.3, color='#9370DB')
+        plt.fill_between(episodes, robot2_rewards, alpha=0.3, color='#FFB84D')
         plt.title('Robot Rewards Comparison')
         plt.xlabel('Episode')
         plt.ylabel('Reward')
         plt.legend()
         plt.grid(True)
-        plt.savefig('enhanced_robots_rewards_comparison.png')
+        plt.savefig('robots_rewards_comparison.png')
         plt.close()
-        
-        # 單獨繪製地圖重疊率趨勢圖
-        plt.figure(figsize=(10, 6))
-        plt.plot(episodes, map_overlap_ratio, color='#1E90FF', linewidth=2)
-        plt.fill_between(episodes, map_overlap_ratio, alpha=0.3, color='#87CEFA')
-        plt.title('Map Overlap Ratio Trend')
-        plt.xlabel('Episode')
-        plt.ylabel('Overlap Ratio')
-        plt.ylim(0, 1.0)
-        plt.grid(True)
-        plt.savefig('enhanced_map_overlap_trend.png')
-        plt.close()
+
+        # 額外繪製重疊率圖（如果有）
+        if has_overlap_data:
+            overlap_data = self.overlap_ratios.copy()
+            if len(overlap_data) < data_length:
+                overlap_data += [0.0] * (data_length - len(overlap_data))
+            elif len(overlap_data) > data_length:
+                overlap_data = overlap_data[:data_length]
+            plt.figure(figsize=(10, 6))
+            plt.plot(episodes, overlap_data, color='#8B008B', linewidth=2)
+            plt.fill_between(episodes, overlap_data, alpha=0.3, color='#9370DB')
+            plt.title('Map Overlap Ratio Over Episodes')
+            plt.xlabel('Episode')
+            plt.ylabel('Overlap Ratio')
+            plt.ylim(0, 1.0)
+            plt.grid(True)
+            plt.savefig('map_overlap_ratio.png')
+            plt.close()
     
-    def save_training_history(self, filename='enhanced_a2c_training_history.npz'):
+    def save_training_history(self, filename='a2c_training_history.npz'):
         """保存訓練歷史"""
         np.savez(
             filename,
@@ -885,10 +844,10 @@ class EnhancedMultiRobotA2CTrainer:
             robot2_value_loss=self.training_history.get('robot2_value_loss', []),
             robot1_policy_loss=self.training_history.get('robot1_policy_loss', []),
             robot2_policy_loss=self.training_history.get('robot2_policy_loss', []),
-            map_overlap_ratio=self.training_history.get('map_overlap_ratio', [])
+            overlap_ratios=self.overlap_ratios
         )
     
-    def load_training_history(self, filename='enhanced_a2c_training_history.npz'):
+    def load_training_history(self, filename='a2c_training_history.npz'):
         """載入訓練歷史"""
         data = np.load(filename, allow_pickle=True)
         self.training_history = {
@@ -910,12 +869,10 @@ class EnhancedMultiRobotA2CTrainer:
             self.training_history['robot1_policy_loss'] = data['robot1_policy_loss'].tolist()
             self.training_history['robot2_policy_loss'] = data['robot2_policy_loss'].tolist()
             
-        # 載入地圖重疊率
-        if 'map_overlap_ratio' in data:
-            self.training_history['map_overlap_ratio'] = data['map_overlap_ratio'].tolist()
-            self.overlap_ratios = data['map_overlap_ratio'].tolist()
+        # 載入重疊率
+        if 'overlap_ratios' in data:
+            self.overlap_ratios = data['overlap_ratios'].tolist()
         else:
-            self.training_history['map_overlap_ratio'] = []
             self.overlap_ratios = []
             
     def save_checkpoint(self, episode):
@@ -941,7 +898,7 @@ class EnhancedMultiRobotA2CTrainer:
             'exploration_rates': [float(x) for x in self.training_history['exploration_rates']],
             'losses': [float(x) if x is not None else 0.0 for x in self.training_history['losses']],
             'exploration_progress': [float(x) for x in self.training_history['exploration_progress']],
-            'map_overlap_ratio': [float(x) for x in self.overlap_ratios]
+            'overlap_ratios': [float(x) for x in self.overlap_ratios]
         }
         
         # 添加可選歷史項目
