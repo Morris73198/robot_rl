@@ -309,9 +309,9 @@ class EnhancedMultiRobotA2CModel:
         """
         self.input_shape = input_shape
         self.max_frontiers = max_frontiers
-        self.d_model = 128  # 降低模型維度以減少記憶需求
-        self.num_heads = 4  # 減少注意力頭數
-        self.dff = 256  # 減少前饋網路維度
+        self.d_model = 256  # 降低模型維度以減少記憶需求
+        self.num_heads = 8  # 減少注意力頭數
+        self.dff = 512  # 減少前饋網路維度
         self.dropout_rate = 0.1
         self.entropy_beta = 0.05  # 熵正則化係數
         self.value_loss_weight = 0.5  # 價值損失權重
@@ -342,9 +342,9 @@ class EnhancedMultiRobotA2CModel:
         """構建感知模塊 (圖3中的Perception部分)"""
         # 多個卷積核大小的CNN塊
         conv_configs = [
-            {'filters': 16, 'kernel_size': 3, 'strides': 1},
-            {'filters': 16, 'kernel_size': 5, 'strides': 1},
-            {'filters': 16, 'kernel_size': 7, 'strides': 1}
+            {'filters': 32, 'kernel_size': 3, 'strides': 1},
+            {'filters': 32, 'kernel_size': 5, 'strides': 1},
+            {'filters': 32, 'kernel_size': 7, 'strides': 1}
         ]
         
         features = []
