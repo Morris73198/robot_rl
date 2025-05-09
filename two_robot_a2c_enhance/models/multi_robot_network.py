@@ -520,7 +520,7 @@ class EnhancedMultiRobotA2CModel:
         entropy_loss = tf.reduce_mean(entropy)
         
         # 增強策略梯度
-        policy_scale = 1.5  # 增加策略梯度尺度
+        policy_scale = 5.0  # 增加策略梯度尺度
         actor_loss = -policy_scale * tf.reduce_mean(selected_log_probs * advantages)
         
         # 動態熵正則化，當策略熵低時增加熵係數
@@ -545,7 +545,7 @@ class EnhancedMultiRobotA2CModel:
         
         # 總損失，增加策略損失權重
         policy_weight = 1.0  # 提高策略損失權重
-        value_weight = 0.5   # 保持價值損失權重不變
+        value_weight = 0.7   # 保持價值損失權重不變
         total_loss = policy_weight * policy_loss + value_weight * value_loss
         
         return total_loss, policy_loss, value_loss, entropy_loss
