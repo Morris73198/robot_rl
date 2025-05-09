@@ -154,7 +154,7 @@ class EnhancedMultiRobotA2CTrainer:
     
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target):
-        """選擇動作，考慮機器人協作"""
+        """選擇動作，完全依賴模型預測，移除外部干預"""
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
@@ -194,81 +194,67 @@ class EnhancedMultiRobotA2CTrainer:
                 robot1_action = np.random.randint(0, valid_frontiers)
                 robot2_action = np.random.randint(0, valid_frontiers)
                 
-                # 避免兩個機器人選擇相同或太近的目標
-                min_distance = self.robot1.sensor_range * 1.5
-                robot1_target_point = frontiers[robot1_action]
-                
-                attempts = 0
-                while attempts < 5:  # 嘗試幾次以找到足夠遠的點
-                    distance = np.linalg.norm(frontiers[robot2_action] - robot1_target_point)
-                    if distance >= min_distance:
-                        break
-                    robot2_action = np.random.randint(0, valid_frontiers)
-                    attempts += 1
+                # 移除手動干預，讓模型完全通過訓練來學習協作策略
+                # 即使在探索階段也允許機器人選擇相同的目標
+                # 這樣模型可以學習到選擇相同目標的後果
             else:
-                # 利用 - 根據策略選擇
-                # 應用溫度參數使策略更加確定
-                temperature = 1.0  # 溫度參數，可調整
+                # 利用 - 使用模型產生的策略分佈來選擇動作
+                # 確保策略有效
                 robot1_probs = robot1_policy[:valid_frontiers]
                 robot2_probs = robot2_policy[:valid_frontiers]
                 
-                # 確保概率有效
+                # 數值穩定性處理
                 robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
                 robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
                 
                 robot1_probs = np.maximum(robot1_probs, 1e-6)
                 robot2_probs = np.maximum(robot2_probs, 1e-6)
                 
+                # 重新歸一化
                 robot1_probs = robot1_probs / np.sum(robot1_probs)
                 robot2_probs = robot2_probs / np.sum(robot2_probs)
                 
-                # 根據策略抽樣動作
+                # 從策略分佈中採樣動作
                 try:
-                    robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+                    # 使用溫度參數增加決策的確定性
+                    temperature = 0.5  # 較低的溫度使策略更加鎖定高概率動作
                     
-                    # 避免兩個機器人選擇相同或相近目標
-                    robot1_target_point = frontiers[robot1_action]
+                    # 應用溫度縮放
+                    robot1_tempered = np.power(robot1_probs, 1/temperature)
+                    robot1_tempered = robot1_tempered / np.sum(robot1_tempered)
                     
-                    # 調整 Robot2 的策略以避開 Robot1 的目標
-                    adjusted_probs = robot2_probs.copy()
-                    min_distance = self.robot1.sensor_range * 1.5
+                    robot2_tempered = np.power(robot2_probs, 1/temperature)
+                    robot2_tempered = robot2_tempered / np.sum(robot2_tempered)
                     
-                    for i in range(valid_frontiers):
-                        distance = np.linalg.norm(frontiers[i] - robot1_target_point)
-                        if distance < min_distance:
-                            # 使用平滑懲罰函數
-                            factor = (distance / min_distance) ** 2
-                            adjusted_probs[i] *= factor
+                    # 從調整後的分佈中採樣
+                    robot1_action = np.random.choice(valid_frontiers, p=robot1_tempered)
+                    robot2_action = np.random.choice(valid_frontiers, p=robot2_tempered)
                     
-                    # 確保概率和為1
-                    adjusted_probs = np.maximum(adjusted_probs, 1e-6)
-                    sum_probs = np.sum(adjusted_probs)
-                    if sum_probs > 0:
-                        adjusted_probs = adjusted_probs / sum_probs
-                        robot2_action = np.random.choice(valid_frontiers, p=adjusted_probs)
-                    else:
-                        # 備用策略：選擇距離 robot1 目標最遠的點
-                        distances = np.linalg.norm(frontiers - robot1_target_point, axis=1)
-                        robot2_action = np.argmax(distances[:valid_frontiers])
+                    # 完全移除手動干預，讓模型自行學習協作策略
+                    
                 except ValueError as e:
-                    print(f"Warning: Error in action selection: {str(e)}")
+                    print(f"警告: 動作選擇出錯: {str(e)}")
+                    # 故障恢復：選擇概率最高的動作
                     robot1_action = np.argmax(robot1_probs)
                     robot2_action = np.argmax(robot2_probs)
             
             return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
                 
         except Exception as e:
-            print(f"Model prediction error: {str(e)}, using random actions")
+            print(f"模型預測錯誤: {str(e)}，使用隨機動作")
             valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-            robot1_action = np.random.randint(valid_frontiers)
-            robot2_action = np.random.randint(valid_frontiers)
+            robot1_action = np.random.randint(0, valid_frontiers)
+            robot2_action = np.random.randint(0, valid_frontiers)
             return robot1_action, robot2_action, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
 
     def compute_returns_and_advantages(self, rewards, values, dones, next_value):
-        """計算折現回報和優勢函數"""
+        """計算折現回報和優勢函數 - 改進版GAE"""
         returns = np.zeros_like(rewards)
         advantages = np.zeros_like(rewards)
         gae = 0
+        
+        # 提高GAE係數以更好地平衡短期和長期獎勵
+        gae_lambda = 0.98  # 從0.95增加到0.98
         
         for t in reversed(range(len(rewards))):
             if t == len(rewards) - 1:
@@ -279,15 +265,30 @@ class EnhancedMultiRobotA2CTrainer:
                 next_non_terminal = 1.0 - dones[t+1]
                 next_val = values[t+1]
                 
-            # 使用 GAE 方法計算優勢
+            # 計算時間差分（TD）誤差
             delta = rewards[t] + self.gamma * next_val * next_non_terminal - values[t]
-            gae = delta + self.gamma * self.gae_lambda * next_non_terminal * gae
-            advantages[t] = gae
-            returns[t] = advantages[t] + values[t]
             
-        # 標準化優勢值
+            # 計算廣義優勢估計（GAE）
+            gae = delta + self.gamma * gae_lambda * next_non_terminal * gae
+            
+            # 保存優勢估計值
+            advantages[t] = gae
+            
+            # 計算目標價值 (return = advantage + value)
+            returns[t] = advantages[t] + values[t]
+        
+        # 強化版標準化：確保優勢具有合適的規模
+        # 這對於策略梯度方法的穩定性非常重要
         if len(advantages) > 1:
-            advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
+            adv_mean = np.mean(advantages)
+            adv_std = np.std(advantages)
+            
+            # 添加一個最小標準差以避免除以接近零的值
+            advantages = (advantages - adv_mean) / (adv_std + 1e-5)
+            
+            # 檢查標準化後的值是否太小，如果太小則進行放大
+            if np.mean(np.abs(advantages)) < 0.1:
+                advantages = advantages * 5.0
         
         return returns, advantages
     
