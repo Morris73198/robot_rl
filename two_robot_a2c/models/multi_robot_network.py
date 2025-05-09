@@ -446,45 +446,60 @@ class MultiRobotA2CModel:
         return model
         
     def _compute_loss(self, robot_name, actions, advantages, values, old_values, returns, old_logits, logits):
-        """計算A2C損失函數，保持參數結構不變但內部實現優化"""
+        """計算A2C損失函數，優化策略更新和多樣性探索"""
         # 確保數據類型一致
         actions = tf.cast(actions, tf.int32)
         advantages = tf.cast(advantages, tf.float32)
         values = tf.cast(values, tf.float32)
-        old_values = tf.cast(old_values, tf.float32)  # 保留但不使用
+        old_values = tf.cast(old_values, tf.float32)
         returns = tf.cast(returns, tf.float32)
-        old_logits = tf.cast(old_logits, tf.float32)  # 保留但不使用
+        old_logits = tf.cast(old_logits, tf.float32)
         logits = tf.cast(logits, tf.float32)
         
         # 將動作轉為one-hot編碼
         actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
-        # 計算策略概率和對數概率
-        probs = tf.nn.softmax(logits, axis=-1)
-        log_probs = tf.math.log(tf.clip_by_value(probs, 1e-10, 1.0))
+        # 計算策略概率和對數概率，應用溫度參數增加策略變異性
+        temperature = tf.constant(1.5, dtype=tf.float32)  # 提高溫度增加探索
+        scaled_logits = logits / temperature
+        
+        probs = tf.nn.softmax(scaled_logits, axis=-1)
+        # 數值穩定性處理，避免極小值
+        log_probs = tf.math.log(tf.clip_by_value(probs, 1e-8, 1.0))
         selected_log_probs = tf.reduce_sum(log_probs * actions_one_hot, axis=-1)
         
         # 計算策略熵
         entropy = -tf.reduce_sum(probs * log_probs, axis=-1)
         entropy_loss = tf.reduce_mean(entropy)
         
-        # 策略損失 (Actor Loss)
-        actor_loss = -tf.reduce_mean(selected_log_probs * advantages)
+        # 增強策略梯度
+        policy_scale = 1.5  # 增加策略梯度尺度
+        actor_loss = -policy_scale * tf.reduce_mean(selected_log_probs * advantages)
         
-        # 添加熵正則化
-        entropy_coef = 0.05  # 增加熵係數以鼓勵探索
-        policy_loss = actor_loss - entropy_coef * entropy_loss
+        # 動態熵正則化，當策略熵低時增加熵係數
+        entropy_threshold = 1.0  # 根據實際熵水平調整
+        current_entropy = tf.reduce_mean(entropy)
+        adaptive_entropy_coef = tf.where(
+            current_entropy < entropy_threshold,
+            0.05,  # 熵低時使用較高係數
+            0.01   # 熵高時使用較低係數
+        )
         
-        # 價值損失 (Critic Loss)
-        # 使用 Huber 損失
+        # 添加策略正則化以防止過度專一化
+        policy_loss = actor_loss - adaptive_entropy_coef * entropy_loss
+        
+        # 改進的價值損失，使用較大的 Huber 閾值以允許更大的誤差範圍
         delta = returns - values
         abs_delta = tf.abs(delta)
-        quadratic = tf.minimum(abs_delta, 1.0)
+        huber_threshold = 2.0  # 增加閾值
+        quadratic = tf.minimum(abs_delta, huber_threshold)
         linear = abs_delta - quadratic
         value_loss = tf.reduce_mean(0.5 * tf.square(quadratic) + linear)
         
-        # 總損失，調整權重
-        total_loss = policy_loss + 0.5 * value_loss  # 減少價值損失的權重
+        # 總損失，增加策略損失權重
+        policy_weight = 1.0  # 提高策略損失權重
+        value_weight = 0.5   # 保持價值損失權重不變
+        total_loss = policy_weight * policy_loss + value_weight * value_loss
         
         return total_loss, policy_loss, value_loss, entropy_loss
     
