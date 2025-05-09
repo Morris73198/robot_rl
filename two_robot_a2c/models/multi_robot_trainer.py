@@ -153,7 +153,7 @@ class MultiRobotA2CTrainer:
 
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target):
-        """基於策略網絡的純粹動作選擇，減少外部干擾"""
+        """基於Epsilon Greedy策略選擇動作"""
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
@@ -165,100 +165,88 @@ class MultiRobotA2CTrainer:
         robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
         robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
         
-        try:
-            # 獲取模型預測
-            predictions = self.model.predict(
-                state_batch, 
-                frontiers_batch, 
-                robot1_pos_batch, 
-                robot2_pos_batch,
-                robot1_target_batch, 
-                robot2_target_batch
-            )
-            
-            # 提取策略和價值
-            robot1_policy = predictions['robot1_policy'][0]
-            robot2_policy = predictions['robot2_policy'][0]
-            robot1_value = float(predictions['robot1_value'][0][0])
-            robot2_value = float(predictions['robot2_value'][0][0])
-            robot1_logits = predictions['robot1_logits'][0]
-            robot2_logits = predictions['robot2_logits'][0]
-            
-            # 確定有效前沿點數量
-            valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-            
-            # 只考慮有效的前沿點策略
-            robot1_probs = robot1_policy[:valid_frontiers]
-            robot2_probs = robot2_policy[:valid_frontiers]
-            
-            # 數值穩定性處理
-            robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
-            robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
-            
-            robot1_probs = np.maximum(robot1_probs, 1e-8)
-            robot2_probs = np.maximum(robot2_probs, 1e-8)
-            
-            # 重新歸一化
-            robot1_probs = robot1_probs / np.sum(robot1_probs)
-            robot2_probs = robot2_probs / np.sum(robot2_probs)
-            
-            # 直接根據策略分佈選擇動作，無額外干擾
-            try:
-                # Robot1 直接按策略選擇
-                robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-                robot1_target_point = frontiers[robot1_action]
-                
-                # Robot2 也按原始策略選擇
-                robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
-                
-                # 唯一的協調邏輯：避免完全相同的目標點
-                # 這是必要的安全措施，不算外部干擾
-                if robot1_action == robot2_action:
-                    # 如果兩個機器人選擇相同的點，讓Robot2重新選擇
-                    # 排除已選的點，從剩餘策略中重新抽樣
-                    remaining_probs = robot2_probs.copy()
-                    remaining_probs[robot1_action] = 0
-                    
-                    # 如果還有其他有效選項
-                    if np.sum(remaining_probs) > 0:
-                        # 重新歸一化
-                        remaining_probs = remaining_probs / np.sum(remaining_probs)
-                        # 重新選擇
-                        robot2_action = np.random.choice(valid_frontiers, p=remaining_probs)
-                    else:
-                        # 如果沒有其他選項，隨機選擇不同點
-                        other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
-                        if other_indices:
-                            robot2_action = np.random.choice(other_indices)
-                
-                return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
-                
-            except ValueError as e:
-                print(f"動作選擇錯誤: {str(e)}")
-                # 發生錯誤時的備用方案 - 選擇最高概率動作
-                robot1_action = np.argmax(robot1_probs)
-                robot2_action = np.argmax(robot2_probs)
-                # 確保不選相同的點
-                if robot1_action == robot2_action and valid_frontiers > 1:
-                    # 找出Robot2的第二高概率動作
-                    second_best = np.argsort(robot2_probs)[-2]
-                    robot2_action = second_best
-                
-                return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
-                    
-        except Exception as e:
-            print(f"模型預測錯誤: {str(e)}")
-            # 發生嚴重錯誤時的備用策略 - 完全隨機選擇
-            valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+        # 確定有效前沿點數量
+        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+        
+        # Epsilon Greedy: 隨機決定是否進行隨機動作
+        if np.random.random() < self.epsilon:
+            # 隨機選擇動作
             robot1_action = np.random.randint(valid_frontiers)
-            # 避免選擇相同的點
-            other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
-            if other_indices and valid_frontiers > 1:
-                robot2_action = np.random.choice(other_indices)
+            
+            # 為robot2選擇不同的動作，避免重疊
+            valid_actions_2 = [i for i in range(valid_frontiers) if i != robot1_action]
+            if valid_actions_2 and valid_frontiers > 1:
+                robot2_action = np.random.choice(valid_actions_2)
             else:
                 robot2_action = np.random.randint(valid_frontiers)
             
-            return robot1_action, robot2_action, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
+            # 取得模型預測以獲取價值估計，但不使用其策略
+            try:
+                predictions = self.model.predict(
+                    state_batch, 
+                    frontiers_batch, 
+                    robot1_pos_batch, 
+                    robot2_pos_batch,
+                    robot1_target_batch, 
+                    robot2_target_batch
+                )
+                robot1_value = float(predictions['robot1_value'][0][0])
+                robot2_value = float(predictions['robot2_value'][0][0])
+                robot1_logits = predictions['robot1_logits'][0]
+                robot2_logits = predictions['robot2_logits'][0]
+            except Exception as e:
+                print(f"模型預測錯誤: {str(e)}")
+                robot1_value = 0.0
+                robot2_value = 0.0
+                robot1_logits = np.zeros(self.model.max_frontiers)
+                robot2_logits = np.zeros(self.model.max_frontiers)
+        else:
+            # 使用模型預測 - 貪婪策略
+            try:
+                predictions = self.model.predict(
+                    state_batch, 
+                    frontiers_batch, 
+                    robot1_pos_batch, 
+                    robot2_pos_batch,
+                    robot1_target_batch, 
+                    robot2_target_batch
+                )
+                
+                # 提取策略和價值
+                robot1_policy = predictions['robot1_policy'][0]
+                robot2_policy = predictions['robot2_policy'][0]
+                robot1_value = float(predictions['robot1_value'][0][0])
+                robot2_value = float(predictions['robot2_value'][0][0])
+                robot1_logits = predictions['robot1_logits'][0]
+                robot2_logits = predictions['robot2_logits'][0]
+                
+                # 取前valid_frontiers個有效值
+                robot1_probs = robot1_policy[:valid_frontiers]
+                robot2_probs = robot2_policy[:valid_frontiers]
+                
+                # 貪婪選擇 - 選擇概率最高的動作
+                robot1_action = np.argmax(robot1_probs)
+                
+                # 對Robot2，排除Robot1選擇的點再進行貪婪選擇
+                robot2_probs_masked = robot2_probs.copy()
+                robot2_probs_masked[robot1_action] = -np.inf  # 將Robot1選擇的點排除
+                robot2_action = np.argmax(robot2_probs_masked)
+                
+            except Exception as e:
+                print(f"模型預測錯誤: {str(e)}")
+                # 出現錯誤時的備用方案 - 隨機選擇
+                robot1_action = np.random.randint(valid_frontiers)
+                valid_actions_2 = [i for i in range(valid_frontiers) if i != robot1_action]
+                if valid_actions_2 and valid_frontiers > 1:
+                    robot2_action = np.random.choice(valid_actions_2)
+                else:
+                    robot2_action = np.random.randint(valid_frontiers)
+                robot1_value = 0.0
+                robot2_value = 0.0
+                robot1_logits = np.zeros(self.model.max_frontiers)
+                robot2_logits = np.zeros(self.model.max_frontiers)
+        
+        return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
 
 
 
@@ -266,57 +254,93 @@ class MultiRobotA2CTrainer:
 
 
     def compute_returns_and_advantages(self, rewards, values, dones, next_value):
-        """改進的回報和優勢計算，加強學習信號"""
+        """改進的回報和優勢計算，加強學習信號並確保優勢函數有意義
+        
+        Args:
+            rewards: 獎勵序列
+            values: 值函數預測序列
+            dones: 終止標誌序列
+            next_value: 最後狀態的值函數預測
+            
+        Returns:
+            returns: 計算的回報
+            advantages: 計算的優勢函數
+        """
+        # 初始化回報和優勢數組
         returns = np.zeros_like(rewards)
         advantages = np.zeros_like(rewards)
+        
+        # 初始化GAE (Generalized Advantage Estimation)
         gae = 0
         
         # 增加獎勵尺度來放大學習信號
-        reward_scale = 1.2
+        # 如果獎勵本身已經很大，可以減小或移除這個系數
+        reward_scale = 1.0
         scaled_rewards = rewards * reward_scale
         
-        # GAE參數可調整
-        gamma = self.gamma  # 保持原有折扣係數
-        lambda_param = 0.97  # 略微提高lambda值以增強長期獎勵傳播
+        # 調整GAE參數 - 略微增加lambda以強化長期獎勵傳播
+        gamma = self.gamma  # 折扣因子，通常為0.99
+        lambda_param = 0.95  # 用於平衡偏差和方差的權衡
         
+        # 從後向前計算回報和優勢
         for t in reversed(range(len(rewards))):
+            # 處理序列最後一個元素或非終止狀態
             if t == len(rewards) - 1:
                 next_non_terminal = 1.0 - dones[t]
                 next_val = next_value
             else:
                 next_non_terminal = 1.0 - dones[t+1]
                 next_val = values[t+1]
-                
-            # 計算TD誤差，使用尺度調整的獎勵
+            
+            # 計算TD誤差 (時序差分誤差)
+            # delta = r_t + gamma * V(s_{t+1}) * (1 - done) - V(s_t)
             delta = scaled_rewards[t] + gamma * next_val * next_non_terminal - values[t]
             
-            # 計算GAE
+            # 計算GAE (廣義優勢估計)
+            # A_t = delta_t + gamma * lambda * A_{t+1} * (1 - done)
             gae = delta + gamma * lambda_param * next_non_terminal * gae
+            
+            # 保存計算的優勢
             advantages[t] = gae
+            
+            # 計算回報: R_t = A_t + V(s_t)
             returns[t] = advantages[t] + values[t]
         
-        # 優化優勢函數標準化，確保足夠的變異性
+        # 優勢函數歸一化 - 這是關鍵步驟，確保優勢函數有合適的規模
         adv_mean = np.mean(advantages)
         adv_std = np.std(advantages)
         
-        # 確保標準差不會太小，防止信號過弱
-        min_std = 0.1
-        if adv_std < min_std:
-            # 如果標準差過小，增加變異性
-            noise_scale = 0.01
-            # 添加小幅噪聲來增加變異性
-            advantages = advantages + np.random.normal(0, noise_scale, size=advantages.shape)
-            # 重新計算統計量
-            adv_mean = np.mean(advantages)
-            adv_std = max(np.std(advantages), min_std)
+        # 確保標準差不為零
+        if adv_std < 1e-8:
+            # 如果標準差接近零，添加小的常數
+            normalized_advantages = advantages - adv_mean
+            # 記錄警告，幫助檢查問題
+            # print("警告: 優勢函數標準差接近零!")
+        else:
+            # 標準化優勢函數，但保持較大範圍
+            normalized_advantages = (advantages - adv_mean) / adv_std
         
-        # 標準化，但確保有足夠變異性
-        normalized_advantages = (advantages - adv_mean) / adv_std
+        # 確保優勢函數有足夠的梯度 - 放大優勢函數
+        # 這是解決Actor Loss過小的關鍵
+        advantages_scale = 5.0  # 增大這個值來增加Actor Loss
+        scaled_advantages = normalized_advantages * advantages_scale
         
-        # 適當裁剪以防止極端值，但保留較大範圍
-        clipped_advantages = np.clip(normalized_advantages, -3.0, 3.0)
+        # 檢測並輸出優勢函數的統計資料，幫助調試
+        adv_min = np.min(scaled_advantages)
+        adv_max = np.max(scaled_advantages)
+        adv_mean = np.mean(scaled_advantages)
+        adv_std = np.std(scaled_advantages)
+        # print(f"優勢函數統計: 最小={adv_min:.4f}, 最大={adv_max:.4f}, 平均={adv_mean:.4f}, 標準差={adv_std:.4f}")
         
-        return returns, clipped_advantages
+        # 計算優勢函數絕對值的平均，幫助評估梯度大小
+        avg_abs_adv = np.mean(np.abs(scaled_advantages))
+        # print(f"優勢函數絕對值平均: {avg_abs_adv:.4f}")
+        
+        # 如果優勢函數絕對值平均過小，輸出警告
+        # if avg_abs_adv < 0.1:
+            # print("警告: 優勢函數絕對值平均過小，可能導致Actor Loss過小!")
+        
+        return returns, scaled_advantages
 
     
     def process_trajectory(self, last_robot1_value=0, last_robot2_value=0):
@@ -638,7 +662,7 @@ class MultiRobotA2CTrainer:
                 print(f"步數: {steps}, 總獎勵: {total_reward:.2f}")
                 print(f"Robot1 獎勵: {robot1_total_reward:.2f}")
                 print(f"Robot2 獎勵: {robot2_total_reward:.2f}")
-                # print(f"探索率: {self.epsilon:.3f}")
+                print(f"探索率: {self.epsilon:.3f}")
                 print(f"平均損失: {self.training_history['losses'][-1]:.6f}")
 
                 # 添加Actor和Critic損失輸出

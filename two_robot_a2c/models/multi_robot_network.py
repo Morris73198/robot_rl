@@ -3,6 +3,7 @@ import numpy as np
 from tensorflow.keras import layers, models, regularizers, optimizers
 import json
 
+# 保持原有的自定義層不變
 class LayerNormalization(layers.Layer):
     """自定義層正規化層"""
     def __init__(self, epsilon=1e-6, **kwargs):
@@ -142,7 +143,7 @@ class PositionalEncoding(layers.Layer):
         return inputs + self.pos_encoding[:, :seq_len, :]
 
 class FeedForward(layers.Layer):
-    """前饋神經網路層"""
+    """前饋神經網絡層"""
     def __init__(self, d_model, dff, dropout_rate=0.1, **kwargs):
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -191,6 +192,9 @@ class SpatialAttention(layers.Layer):
         output = inputs * attention_map
         output = self.norm(output)
         return output
+        
+    def get_config(self):
+        return super().get_config()
 
 class MultiRobotA2CModel:
     def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
@@ -204,16 +208,17 @@ class MultiRobotA2CModel:
         self.max_frontiers = max_frontiers
         self.d_model = 256  # 模型維度
         self.num_heads = 8  # 注意力頭數
-        self.dff = 512  # 前饋網路維度
+        self.dff = 512  # 前饋網絡維度
         self.dropout_rate = 0.1
-        self.entropy_beta = 0.00  # 熵正則化係數
+        self.entropy_beta = 0.01  # 熵正則化係數
         self.value_loss_weight = 0.5  # 價值損失權重
         
-        # 構建模型
-        self.model = self._build_model()
+        # 構建分離的模型
+        self.actor = self._build_actor()
+        self.critic = self._build_critic()
         
     def pad_frontiers(self, frontiers):
-        """Pad frontier points to fixed length and normalize coordinates"""
+        """填充frontier點到固定長度並標準化座標"""
         padded = np.zeros((self.max_frontiers, 2))
         
         if len(frontiers) > 0:
@@ -360,8 +365,10 @@ class MultiRobotA2CModel:
         
         return value
 
-    def _build_model(self):
-        """構建完整的A2C模型"""
+    # ----- 修改部分: 使用分離的Actor-Critic模型 -----
+    
+    def _build_actor(self):
+        """構建 Actor 網絡"""
         # 輸入層
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(
@@ -401,7 +408,7 @@ class MultiRobotA2CModel:
         robot1_frontier = self._build_frontier_module(frontier_input, robot1_coord)
         robot2_frontier = self._build_frontier_module(frontier_input, robot2_coord)
         
-        # 5. A2C架構
+        # 5. Actor 輸出
         # Robot 1的特徵
         robot1_features = layers.Concatenate()([
             layers.Flatten()(robot1_frontier),
@@ -416,15 +423,12 @@ class MultiRobotA2CModel:
             map_features_flat
         ])
         
-        # 構建Actor和Critic網絡
+        # 構建Actor網絡
         robot1_policy, robot1_logits = self._build_actor_network(robot1_features, "robot1")
-        robot1_value = self._build_critic_network(robot1_features, "robot1")
-        
         robot2_policy, robot2_logits = self._build_actor_network(robot2_features, "robot2")
-        robot2_value = self._build_critic_network(robot2_features, "robot2")
         
-        # 構建完整模型
-        model = models.Model(
+        # 構建Actor模型
+        actor_model = models.Model(
             inputs={
                 'map_input': map_input,
                 'frontier_input': frontier_input,
@@ -435,173 +439,300 @@ class MultiRobotA2CModel:
             },
             outputs={
                 'robot1_policy': robot1_policy,
-                'robot1_value': robot1_value,
                 'robot2_policy': robot2_policy,
-                'robot2_value': robot2_value,
                 'robot1_logits': robot1_logits,
                 'robot2_logits': robot2_logits
             }
         )
         
-        return model
+        # 設置優化器但不編譯，我們將使用自定義訓練函數
+        actor_model.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
         
-    def _compute_loss(self, robot_name, actions, advantages, values, old_values, returns, old_logits, logits):
-        """計算A2C損失函數，優化策略更新和多樣性探索"""
-        # 確保數據類型一致
-        actions = tf.cast(actions, tf.int32)
-        advantages = tf.cast(advantages, tf.float32)
-        values = tf.cast(values, tf.float32)
-        old_values = tf.cast(old_values, tf.float32)
-        returns = tf.cast(returns, tf.float32)
-        old_logits = tf.cast(old_logits, tf.float32)
-        logits = tf.cast(logits, tf.float32)
+        return actor_model
+    
+    def _build_critic(self):
+        """構建 Critic 網絡"""
+        # 輸入層
+        map_input = layers.Input(shape=self.input_shape, name='map_input')
+        frontier_input = layers.Input(
+            shape=(self.max_frontiers, 2),
+            name='frontier_input'
+        )
+        robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
+        robot2_pos = layers.Input(shape=(2,), name='robot2_pos_input')
+        robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
+        robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 將動作轉為one-hot編碼
+        # 1. 地圖感知處理
+        map_features = self._build_perception_module(map_input)
+        map_features_flat = layers.Flatten()(map_features)
+        
+        # 2. 機器人狀態編碼
+        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
+        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
+        
+        robot1_features = layers.Dense(
+            self.d_model,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot1_state)
+        robot2_features = layers.Dense(
+            self.d_model,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01)
+        )(robot2_state)
+        
+        # 3. 協調模塊
+        robot1_coord, robot2_coord = self._build_coordination_module(
+            robot1_features, robot2_features
+        )
+        
+        # 4. Frontier評估
+        robot1_frontier = self._build_frontier_module(frontier_input, robot1_coord)
+        robot2_frontier = self._build_frontier_module(frontier_input, robot2_coord)
+        
+        # 5. Critic 輸出
+        # Robot 1的特徵
+        robot1_features = layers.Concatenate()([
+            layers.Flatten()(robot1_frontier),
+            robot1_coord,
+            map_features_flat
+        ])
+        
+        # Robot 2的特徵
+        robot2_features = layers.Concatenate()([
+            layers.Flatten()(robot2_frontier),
+            robot2_coord,
+            map_features_flat
+        ])
+        
+        # 構建Critic網絡
+        robot1_value = self._build_critic_network(robot1_features, "robot1")
+        robot2_value = self._build_critic_network(robot2_features, "robot2")
+        
+        # 構建Critic模型
+        critic_model = models.Model(
+            inputs={
+                'map_input': map_input,
+                'frontier_input': frontier_input,
+                'robot1_pos_input': robot1_pos,
+                'robot2_pos_input': robot2_pos,
+                'robot1_target_input': robot1_target,
+                'robot2_target_input': robot2_target
+            },
+            outputs={
+                'robot1_value': robot1_value,
+                'robot2_value': robot2_value
+            }
+        )
+        
+        # 設置優化器並編譯critic模型
+        critic_model.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+        critic_model.compile(optimizer=critic_model.optimizer, loss='mse')
+        
+        return critic_model
+
+    # ----- 以下是新的loss計算方法和訓練函數 -----
+    
+    def _compute_policy_loss(self, policy, actions, advantages):
+        """計算策略損失
+        
+        Args:
+            policy: 策略網絡輸出的動作概率分佈
+            actions: 實際執行的動作
+            advantages: 計算出的優勢值
+        
+        Returns:
+            policy_loss: 策略損失值
+        """
+        # 將動作轉換為 one-hot 編碼
         actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
-        # 計算策略概率和對數概率，應用溫度參數增加策略變異性
-        temperature = tf.constant(1.5, dtype=tf.float32)  # 提高溫度增加探索
-        scaled_logits = logits / temperature
+        # 計算所選動作的對數概率
+        log_prob = tf.math.log(tf.reduce_sum(policy * actions_one_hot, axis=1) + 1e-10)
         
-        probs = tf.nn.softmax(scaled_logits, axis=-1)
-        # 數值穩定性處理，避免極小值
-        log_probs = tf.math.log(tf.clip_by_value(probs, 1e-8, 1.0))
-        selected_log_probs = tf.reduce_sum(log_probs * actions_one_hot, axis=-1)
+        # 計算策略損失
+        policy_loss = -tf.reduce_mean(log_prob * advantages)
         
-        # 計算策略熵
-        entropy = -tf.reduce_sum(probs * log_probs, axis=-1)
-        entropy_loss = tf.reduce_mean(entropy)
+        # 添加熵正則化以鼓勵探索
+        entropy = -tf.reduce_sum(policy * tf.math.log(policy + 1e-10), axis=1)
+        entropy_bonus = self.entropy_beta * tf.reduce_mean(entropy)
         
-        # 增強策略梯度
-        policy_scale = 1.5  # 增加策略梯度尺度
-        actor_loss = -policy_scale * tf.reduce_mean(selected_log_probs * advantages)
+        return policy_loss - entropy_bonus
+    
+    def train_actor(self, states, frontiers, robot1_pos, robot2_pos, 
+                   robot1_target, robot2_target, 
+                   robot1_actions, robot2_actions, 
+                   robot1_advantages, robot2_advantages):
+        """訓練Actor網絡
         
-        # 動態熵正則化，當策略熵低時增加熵係數
-        entropy_threshold = 1.0  # 根據實際熵水平調整
-        current_entropy = tf.reduce_mean(entropy)
-        adaptive_entropy_coef = tf.where(
-            current_entropy < entropy_threshold,
-            0.05,  # 熵低時使用較高係數
-            0.01   # 熵高時使用較低係數
+        Args:
+            states: 狀態批次
+            frontiers: frontier點批次
+            robot1_pos, robot2_pos: 機器人位置
+            robot1_target, robot2_target: 機器人目標
+            robot1_actions, robot2_actions: 實際動作
+            robot1_advantages, robot2_advantages: 計算出的優勢值
+            
+        Returns:
+            loss: 訓練損失
+        """
+        with tf.GradientTape() as tape:
+            # 獲取策略預測
+            policy_dict = self.actor({
+                'map_input': states,
+                'frontier_input': frontiers,
+                'robot1_pos_input': robot1_pos,
+                'robot2_pos_input': robot2_pos,
+                'robot1_target_input': robot1_target,
+                'robot2_target_input': robot2_target
+            }, training=True)
+            
+            # 計算機器人1的策略損失
+            robot1_loss = self._compute_policy_loss(
+                policy_dict['robot1_policy'],
+                robot1_actions,
+                robot1_advantages
+            )
+            
+            # 計算機器人2的策略損失
+            robot2_loss = self._compute_policy_loss(
+                policy_dict['robot2_policy'],
+                robot2_actions,
+                robot2_advantages
+            )
+            
+            # 總策略損失
+            total_loss = robot1_loss + robot2_loss
+            
+        # 計算梯度並應用
+        grads = tape.gradient(total_loss, self.actor.trainable_variables)
+        
+        # 梯度裁剪
+        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        
+        # 應用梯度
+        self.actor.optimizer.apply_gradients(zip(grads, self.actor.trainable_variables))
+        
+        # 返回訓練指標
+        return {
+            'total_policy_loss': total_loss,
+            'robot1_policy_loss': robot1_loss,
+            'robot2_policy_loss': robot2_loss
+        }
+    
+    def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
+                    robot1_target, robot2_target, 
+                    robot1_returns, robot2_returns):
+        """訓練Critic網絡
+        
+        Args:
+            states: 狀態批次
+            frontiers: frontier點批次
+            robot1_pos, robot2_pos: 機器人位置
+            robot1_target, robot2_target: 機器人目標
+            robot1_returns, robot2_returns: 實際回報
+            
+        Returns:
+            loss: 訓練損失
+        """
+        with tf.GradientTape() as tape:
+            # 獲取價值預測
+            values = self.critic({
+                'map_input': states,
+                'frontier_input': frontiers,
+                'robot1_pos_input': robot1_pos,
+                'robot2_pos_input': robot2_pos,
+                'robot1_target_input': robot1_target,
+                'robot2_target_input': robot2_target
+            }, training=True)
+            
+            # 計算機器人1的價值損失
+            robot1_value_loss = tf.keras.losses.Huber()(
+                robot1_returns, values['robot1_value'])
+            
+            # 計算機器人2的價值損失
+            robot2_value_loss = tf.keras.losses.Huber()(
+                robot2_returns, values['robot2_value'])
+            
+            # 總價值損失
+            value_loss = robot1_value_loss + robot2_value_loss
+            
+        # 計算梯度並應用
+        grads = tape.gradient(value_loss, self.critic.trainable_variables)
+        
+        # 梯度裁剪
+        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        
+        # 應用梯度
+        self.critic.optimizer.apply_gradients(zip(grads, self.critic.trainable_variables))
+        
+        # 返回訓練指標
+        return {
+            'total_value_loss': value_loss,
+            'robot1_value_loss': robot1_value_loss,
+            'robot2_value_loss': robot2_value_loss
+        }
+    
+    def train_batch(self, states, frontiers, robot1_pos, robot2_pos, 
+                   robot1_target, robot2_target,
+                   robot1_actions, robot2_actions, 
+                   robot1_advantages, robot2_advantages,
+                   robot1_returns, robot2_returns,
+                   robot1_old_values, robot2_old_values,
+                   robot1_old_logits, robot2_old_logits):
+        """訓練一個批次的數據
+        
+        注意：雖然實現了network2的形式，但保留了原始API的參數列表，
+        robot1_old_values, robot2_old_values, robot1_old_logits, robot2_old_logits 
+        參數在新實現中沒有使用
+        """
+        # 訓練Actor
+        actor_metrics = self.train_actor(
+            states, frontiers, robot1_pos, robot2_pos, 
+            robot1_target, robot2_target,
+            robot1_actions, robot2_actions, 
+            robot1_advantages, robot2_advantages
         )
         
-        # 添加策略正則化以防止過度專一化
-        policy_loss = actor_loss - adaptive_entropy_coef * entropy_loss
-        
-        # 改進的價值損失，使用較大的 Huber 閾值以允許更大的誤差範圍
-        delta = returns - values
-        abs_delta = tf.abs(delta)
-        huber_threshold = 2.0  # 增加閾值
-        quadratic = tf.minimum(abs_delta, huber_threshold)
-        linear = abs_delta - quadratic
-        value_loss = tf.reduce_mean(0.5 * tf.square(quadratic) + linear)
-        
-        # 總損失，增加策略損失權重
-        policy_weight = 1.0  # 提高策略損失權重
-        value_weight = 0.5   # 保持價值損失權重不變
-        total_loss = policy_weight * policy_loss + value_weight * value_loss
-        
-        return total_loss, policy_loss, value_loss, entropy_loss
-    
-    def _create_train_function(self):
-        """創建訓練函數"""
-        # 創建優化器
-        initial_learning_rate = 0.00005  # 降低初始學習率
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate,
-            decay_steps=1000,
-            decay_rate=0.95,
-            staircase=True
+        # 訓練Critic
+        critic_metrics = self.train_critic(
+            states, frontiers, robot1_pos, robot2_pos, 
+            robot1_target, robot2_target,
+            robot1_returns, robot2_returns
         )
-        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
         
-        @tf.function
-        def train_step(states, frontiers, robot1_pos, robot2_pos, 
-                      robot1_target, robot2_target,
-                      robot1_actions, robot2_actions, 
-                      robot1_advantages, robot2_advantages,
-                      robot1_returns, robot2_returns,
-                      robot1_old_values, robot2_old_values,
-                      robot1_old_logits, robot2_old_logits):
-            """執行單步訓練"""
-            # 確保所有輸入都是正確的數據類型
-            states = tf.cast(states, tf.float32)
-            frontiers = tf.cast(frontiers, tf.float32)
-            robot1_pos = tf.cast(robot1_pos, tf.float32)
-            robot2_pos = tf.cast(robot2_pos, tf.float32)
-            robot1_target = tf.cast(robot1_target, tf.float32)
-            robot2_target = tf.cast(robot2_target, tf.float32)
-            robot1_actions = tf.cast(robot1_actions, tf.int32)
-            robot2_actions = tf.cast(robot2_actions, tf.int32)
-            robot1_advantages = tf.cast(robot1_advantages, tf.float32)
-            robot2_advantages = tf.cast(robot2_advantages, tf.float32)
-            robot1_returns = tf.cast(robot1_returns, tf.float32)
-            robot2_returns = tf.cast(robot2_returns, tf.float32)
-            robot1_old_values = tf.cast(robot1_old_values, tf.float32)
-            robot2_old_values = tf.cast(robot2_old_values, tf.float32)
-            robot1_old_logits = tf.cast(robot1_old_logits, tf.float32)
-            robot2_old_logits = tf.cast(robot2_old_logits, tf.float32)
-            
-            with tf.GradientTape() as tape:
-                # 獲取模型預測
-                outputs = self.model({
-                    'map_input': states,
-                    'frontier_input': frontiers,
-                    'robot1_pos_input': robot1_pos,
-                    'robot2_pos_input': robot2_pos,
-                    'robot1_target_input': robot1_target,
-                    'robot2_target_input': robot2_target
-                }, training=True)
-                
-                # 提取輸出
-                robot1_policy = outputs['robot1_policy']
-                robot1_value = outputs['robot1_value'][:, 0]
-                robot1_logits = outputs['robot1_logits']
-                
-                robot2_policy = outputs['robot2_policy']
-                robot2_value = outputs['robot2_value'][:, 0]
-                robot2_logits = outputs['robot2_logits']
-                
-                # 計算機器人1的損失
-                robot1_loss, robot1_policy_loss, robot1_value_loss, robot1_entropy = self._compute_loss(
-                    'robot1', robot1_actions, robot1_advantages, robot1_value, 
-                    robot1_old_values, robot1_returns, robot1_old_logits, robot1_logits
-                )
-                
-                # 計算機器人2的損失
-                robot2_loss, robot2_policy_loss, robot2_value_loss, robot2_entropy = self._compute_loss(
-                    'robot2', robot2_actions, robot2_advantages, robot2_value, 
-                    robot2_old_values, robot2_returns, robot2_old_logits, robot2_logits
-                )
-                
-                # 總損失
-                total_loss = robot1_loss + robot2_loss
-                
-            # 計算梯度並應用
-            gradients = tape.gradient(total_loss, self.model.trainable_variables)
-    
-            # 計算梯度範數
-            global_norm = tf.linalg.global_norm(gradients)
-            
-            # 更保守的梯度裁剪
-            gradients, _ = tf.clip_by_global_norm(gradients, 1.0)  
-            
-            optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
-            
-            return {
-                'total_loss': total_loss,
-                'robot1_loss': robot1_loss,
-                'robot1_policy_loss': robot1_policy_loss,
-                'robot1_value_loss': robot1_value_loss,
-                'robot1_entropy': robot1_entropy,
-                'robot2_loss': robot2_loss,
-                'robot2_policy_loss': robot2_policy_loss,
-                'robot2_value_loss': robot2_value_loss,
-                'robot2_entropy': robot2_entropy,
-                'gradient_norm': global_norm  # 添加梯度範數監控
-            }
-            
-        self.train_step = train_step
+        # 計算熵
+        policy_dict = self.actor.predict({
+            'map_input': states,
+            'frontier_input': frontiers,
+            'robot1_pos_input': robot1_pos,
+            'robot2_pos_input': robot2_pos,
+            'robot1_target_input': robot1_target,
+            'robot2_target_input': robot2_target
+        }, verbose=0)
+        
+        # 計算熵
+        robot1_entropy = -tf.reduce_mean(tf.reduce_sum(
+            policy_dict['robot1_policy'] * tf.math.log(policy_dict['robot1_policy'] + 1e-10), 
+            axis=1
+        ))
+        robot2_entropy = -tf.reduce_mean(tf.reduce_sum(
+            policy_dict['robot2_policy'] * tf.math.log(policy_dict['robot2_policy'] + 1e-10), 
+            axis=1
+        ))
+        
+        # 合併所有指標
+        return {
+            'total_loss': actor_metrics['total_policy_loss'] + critic_metrics['total_value_loss'],
+            'robot1_policy_loss': actor_metrics['robot1_policy_loss'],
+            'robot2_policy_loss': actor_metrics['robot2_policy_loss'],
+            'robot1_value_loss': critic_metrics['robot1_value_loss'],
+            'robot2_value_loss': critic_metrics['robot2_value_loss'],
+            'robot1_entropy': robot1_entropy,
+            'robot2_entropy': robot2_entropy,
+            'gradient_norm': 0.0  # 保持接口一致，但簡化實現
+        }
     
     def predict(self, state, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target):
         """預測動作分佈和狀態價值"""
@@ -618,44 +749,45 @@ class MultiRobotA2CModel:
             robot1_target = np.expand_dims(robot1_target, 0)
         if len(robot2_target.shape) == 1:
             robot2_target = np.expand_dims(robot2_target, 0)
-            
-        return self.model.predict(
-            {
-                'map_input': state,
-                'frontier_input': frontiers,
-                'robot1_pos_input': robot1_pos,
-                'robot2_pos_input': robot2_pos,
-                'robot1_target_input': robot1_target,
-                'robot2_target_input': robot2_target
-            },
-            verbose=0
-        )
-    
-    def train_batch(self, states, frontiers, robot1_pos, robot2_pos, 
-                   robot1_target, robot2_target,
-                   robot1_actions, robot2_actions, 
-                   robot1_advantages, robot2_advantages,
-                   robot1_returns, robot2_returns,
-                   robot1_old_values, robot2_old_values,
-                   robot1_old_logits, robot2_old_logits):
-        """訓練一個批次的數據"""
-        if not hasattr(self, 'train_step'):
-            self._create_train_function()
-            
-        return self.train_step(
-            states, frontiers, robot1_pos, robot2_pos, 
-            robot1_target, robot2_target,
-            robot1_actions, robot2_actions, 
-            robot1_advantages, robot2_advantages,
-            robot1_returns, robot2_returns,
-            robot1_old_values, robot2_old_values,
-            robot1_old_logits, robot2_old_logits
-        )
+        
+        # 構建輸入字典
+        inputs = {
+            'map_input': state,
+            'frontier_input': frontiers,
+            'robot1_pos_input': robot1_pos,
+            'robot2_pos_input': robot2_pos,
+            'robot1_target_input': robot1_target,
+            'robot2_target_input': robot2_target
+        }
+        
+        # 獲取Actor輸出
+        actor_outputs = self.actor.predict(inputs, verbose=0)
+        
+        # 獲取Critic輸出
+        critic_outputs = self.critic.predict(inputs, verbose=0)
+        
+        # 合併結果
+        return {
+            'robot1_policy': actor_outputs['robot1_policy'],
+            'robot2_policy': actor_outputs['robot2_policy'],
+            'robot1_value': critic_outputs['robot1_value'],
+            'robot2_value': critic_outputs['robot2_value'],
+            'robot1_logits': actor_outputs['robot1_logits'],
+            'robot2_logits': actor_outputs['robot2_logits']
+        }
     
     def save(self, filepath):
-        """保存模型"""
-        # 保存模型架構和權重
-        self.model.save(filepath)
+        """保存模型為 .h5 格式"""
+        # 保存 Actor 模型
+        actor_path = filepath + '_actor.h5'
+        print(f"保存 actor 模型到: {actor_path}")
+        self.actor.save(actor_path, save_format='h5')
+        
+        # 保存 Critic 模型
+        critic_path = filepath + '_critic.h5'
+        print(f"保存 critic 模型到: {critic_path}")
+        self.critic.save(critic_path, save_format='h5')
+        
         # 保存額外的配置信息
         config = {
             'input_shape': self.input_shape,
@@ -667,11 +799,14 @@ class MultiRobotA2CModel:
             'entropy_beta': self.entropy_beta,
             'value_loss_weight': self.value_loss_weight
         }
+        
         with open(filepath + '_config.json', 'w') as f:
             json.dump(config, f)
+            
+        print(f"模型已儲存為 .h5 格式")
     
     def load(self, filepath):
-        """載入模型"""
+        """載入 .h5 格式的模型"""
         # 創建自定義對象字典
         custom_objects = {
             'LayerNormalization': LayerNormalization,
@@ -681,13 +816,46 @@ class MultiRobotA2CModel:
             'SpatialAttention': SpatialAttention
         }
         
-        # 載入模型
-        self.model = models.load_model(
-            filepath,
-            custom_objects=custom_objects
-        )
-        
-        # 重新創建訓練函數
-        if hasattr(self, 'train_step'):
-            delattr(self, 'train_step')
-        self._create_train_function()
+        try:
+            # 載入配置
+            with open(filepath + '_config.json', 'r') as f:
+                config = json.load(f)
+                
+            # 更新模型配置
+            self.input_shape = tuple(config['input_shape'])
+            self.max_frontiers = config['max_frontiers']
+            self.d_model = config['d_model']
+            self.num_heads = config['num_heads']
+            self.dff = config['dff']
+            self.dropout_rate = config['dropout_rate']
+            
+            # 載入 actor 模型
+            actor_path = filepath + '_actor.h5'
+            print(f"載入 actor 模型: {actor_path}")
+            self.actor = tf.keras.models.load_model(
+                actor_path,
+                custom_objects=custom_objects
+            )
+            
+            # 載入 critic 模型
+            critic_path = filepath + '_critic.h5'
+            print(f"載入 critic 模型: {critic_path}")
+            self.critic = tf.keras.models.load_model(
+                critic_path,
+                custom_objects=custom_objects
+            )
+            
+            # 設置優化器
+            if not hasattr(self.actor, 'optimizer') or self.actor.optimizer is None:
+                self.actor.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+            
+            if not hasattr(self.critic, 'optimizer') or self.critic.optimizer is None:
+                self.critic.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+                self.critic.compile(optimizer=self.critic.optimizer, loss='mse')
+            
+            print("模型載入成功")
+            return True
+            
+        except Exception as e:
+            print(f"載入模型時出錯: {str(e)}")
+            return False
