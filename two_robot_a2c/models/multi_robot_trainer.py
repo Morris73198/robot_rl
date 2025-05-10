@@ -153,7 +153,7 @@ class MultiRobotA2CTrainer:
 
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target):
-        """基於策略機率選擇動作，使用策略熵進行探索"""
+        """基於策略機率選擇動作，不添加額外人工規則"""
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
@@ -217,18 +217,27 @@ class MultiRobotA2CTrainer:
         else:
             robot2_probs = np.ones(valid_frontiers) / valid_frontiers
         
-        # 直接基於策略網絡的輸出進行動作採樣
-        try:
-            robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-            robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
-        except ValueError as e:
-            print(f"採樣策略時出錯: {str(e)}")
-            print(f"robot1_probs: {robot1_probs}, sum: {np.sum(robot1_probs)}")
-            print(f"robot2_probs: {robot2_probs}, sum: {np.sum(robot2_probs)}")
-            
-            # 發生錯誤時回退到均勻採樣
+        # 根據是否使用epsilon-greedy策略決定動作選擇方式
+        if np.random.random() < self.epsilon:
+            # 探索模式：完全隨機選擇，不基於模型輸出
             robot1_action = np.random.randint(valid_frontiers)
+            
+            # Robot2也完全隨機選擇
             robot2_action = np.random.randint(valid_frontiers)
+        else:
+            # 利用模式：完全基於策略網絡的輸出
+            # 使用策略機率進行採樣，而不是直接選擇最高概率的動作
+            try:
+                robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+                robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
+            except ValueError as e:
+                print(f"採樣策略時出錯: {str(e)}")
+                print(f"robot1_probs: {robot1_probs}, sum: {np.sum(robot1_probs)}")
+                print(f"robot2_probs: {robot2_probs}, sum: {np.sum(robot2_probs)}")
+                
+                # 發生錯誤時回退到均勻採樣
+                robot1_action = np.random.randint(valid_frontiers)
+                robot2_action = np.random.randint(valid_frontiers)
         
         return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
 
