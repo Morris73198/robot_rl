@@ -2,7 +2,6 @@ import os
 import tensorflow as tf
 
 import sys
-# Fix the imports to match the actual class names in the modules
 from two_robot_a2c_enhance.models.multi_robot_network import EnhancedMultiRobotA2CModel
 from two_robot_a2c_enhance.models.multi_robot_trainer import EnhancedMultiRobotA2CTrainer
 from two_robot_a2c_enhance.environment.multi_robot_no_unknown import Robot
@@ -15,29 +14,29 @@ plt.ion()
 
 def main():
     try:
-        # Specify model path
-        model_path = os.path.join(MODEL_DIR, 'enhanced_multi_robot_model_a2c_latest.h5')
+        # 指定模型路徑
+        model_path = os.path.join(MODEL_DIR, 'multi_robot_model_a2c_latest.h5')
         
         if os.path.exists(model_path):
-            print(f"Loading A2C model: {model_path}")
-            # Create model and load weights
+            print(f"正在載入A2C模型: {model_path}")
+            # 創建模型並載入權重
             model = EnhancedMultiRobotA2CModel(
                 input_shape=MODEL_CONFIG['input_shape'],
                 max_frontiers=MODEL_CONFIG['max_frontiers']
             )
             model.load(model_path)
             
-            # Create shared environment with two robots
-            print("Creating robots...")
+            # 創建共享環境的兩個機器人
+            print("正在創建機器人...")
             robot1, robot2 = Robot.create_shared_robots(
                 index_map=0, 
                 train=True, 
                 plot=True
             )
             
-            # Create trainer
-            print("Creating A2C trainer...")
-            trainer = EnhancedMultiRobotA2CTrainer(  # Fixed class name
+            # 創建訓練器
+            print("正在創建A2C訓練器...")
+            trainer = EnhancedMultiRobotA2CTrainer(
                 model=model,
                 robot1=robot1,
                 robot2=robot2,
@@ -46,37 +45,37 @@ def main():
                 gamma=MODEL_CONFIG['gamma']
             )
             
-            # Adjust exploration parameters
-            trainer.epsilon = 0.35          # Current epsilon value
-            trainer.epsilon_min = 0.05     # Minimum epsilon value
-            trainer.epsilon_decay = 0.99995  # Epsilon decay rate
+            # 調整探索參數
+            trainer.epsilon = 0.35          # 設置當前的 epsilon 值
+            trainer.epsilon_min = 0.05     # 設置最小 epsilon 值
+            trainer.epsilon_decay = 0.99995  # 設置 epsilon 衰減率
             
-            print(f"Starting training... (Current epsilon: {trainer.epsilon})")
+            print(f"開始訓練... (當前 epsilon: {trainer.epsilon})")
             trainer.train(
                 episodes=TRAIN_CONFIG['episodes'],
                 save_freq=TRAIN_CONFIG['save_freq']
             )
         else:
-            print(f"Model file not found at {model_path}")
-            print("Starting new training...")
+            print(f"在 {model_path} 未找到模型檔案")
+            print("將開始全新訓練...")
             
-            print("Creating enhanced A2C model...")
-            model = EnhancedMultiRobotA2CModel(  # Fixed class name
+            print("正在創建A2C模型...")
+            model = EnhancedMultiRobotA2CModel(
                 input_shape=MODEL_CONFIG['input_shape'],
                 max_frontiers=MODEL_CONFIG['max_frontiers']
             )
         
-            # Create shared environment with two robots
-            print("Creating robots...")
+            # 創建共享環境的兩個機器人
+            print("正在創建機器人...")
             robot1, robot2 = Robot.create_shared_robots(
                 index_map=0, 
                 train=True, 
                 plot=True
             )
             
-            # Create trainer
-            print("Creating A2C trainer...")
-            trainer = EnhancedMultiRobotA2CTrainer(  # Fixed class name
+            # 創建訓練器
+            print("正在創建A2C訓練器...")
+            trainer = EnhancedMultiRobotA2CTrainer(
                 model=model,
                 robot1=robot1,
                 robot2=robot2,
@@ -85,23 +84,23 @@ def main():
                 gamma=MODEL_CONFIG['gamma']
             )
             
-            # Set epsilon parameters
-            trainer.epsilon = 1.0           # Initial epsilon value (exploration rate)
-            trainer.epsilon_min = 0.075     # Minimum epsilon value
-            trainer.epsilon_decay = 0.9985  # Epsilon decay rate
+            # 設置 epsilon 相關參數
+            trainer.epsilon = 0.0           # 設置當前的 epsilon 值 (探索率)
+            trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
+            trainer.epsilon_decay = 0.9985  # 設置 epsilon 衰減率
             
-            # Ensure model save directory exists
+            # 確保模型保存目錄存在
             if not os.path.exists(MODEL_DIR):
                 os.makedirs(MODEL_DIR)
                 
-            print(f"Starting training... (Current epsilon: {trainer.epsilon})")
+            print(f"開始訓練... (當前 epsilon: {trainer.epsilon})")
             trainer.train(
                 episodes=TRAIN_CONFIG['episodes'],
                 save_freq=TRAIN_CONFIG['save_freq']
             )
         
     except Exception as e:
-        print(f"Error occurred: {str(e)}")
+        print(f"發生錯誤: {str(e)}")
         import traceback
         traceback.print_exc()
 
