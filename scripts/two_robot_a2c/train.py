@@ -85,7 +85,7 @@ def main():
             )
             
             # 設置 epsilon 相關參數
-            trainer.epsilon = 1.0           # 設置當前的 epsilon 值 (探索率)
+            trainer.epsilon = 0.0           # 設置當前的 epsilon 值 (探索率)
             trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
             trainer.epsilon_decay = 0.9989985  # 設置 epsilon 衰減率
             
