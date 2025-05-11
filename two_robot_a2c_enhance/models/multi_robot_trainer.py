@@ -148,157 +148,294 @@ class EnhancedMultiRobotA2CTrainer:
         ])
         return normalized
     
+    # def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
+    #                 robot1_target, robot2_target):
+    #     """Choose actions based on policy entropy and temperature sampling"""
+    #     if len(frontiers) == 0:
+    #         return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
+        
+    #     # Prepare inputs
+    #     state_batch = np.expand_dims(state, 0).astype(np.float32)
+    #     frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0).astype(np.float32)
+    #     robot1_pos_batch = np.expand_dims(robot1_pos, 0).astype(np.float32)
+    #     robot2_pos_batch = np.expand_dims(robot2_pos, 0).astype(np.float32)
+    #     robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
+    #     robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
+        
+    #     # Determine valid frontier count
+    #     valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+        
+    #     # Get model predictions
+    #     try:
+    #         predictions = self.model.predict(
+    #             state_batch, 
+    #             frontiers_batch, 
+    #             robot1_pos_batch, 
+    #             robot2_pos_batch,
+    #             robot1_target_batch, 
+    #             robot2_target_batch
+    #         )
+            
+    #         robot1_policy = predictions['robot1_policy'][0]
+    #         robot2_policy = predictions['robot2_policy'][0]
+    #         robot1_value = float(predictions['robot1_value'][0][0])
+    #         robot2_value = float(predictions['robot2_value'][0][0])
+    #         robot1_logits = predictions['robot1_logits'][0]
+    #         robot2_logits = predictions['robot2_logits'][0]
+    #     except Exception as e:
+    #         print(f"Model prediction error: {str(e)}")
+    #         # Use uniform distribution if prediction fails
+    #         robot1_policy = np.ones(self.model.max_frontiers) / self.model.max_frontiers
+    #         robot2_policy = np.ones(self.model.max_frontiers) / self.model.max_frontiers
+    #         robot1_value = 0.0
+    #         robot2_value = 0.0
+    #         robot1_logits = np.zeros(self.model.max_frontiers)
+    #         robot2_logits = np.zeros(self.model.max_frontiers)
+        
+    #     # Consider only valid frontiers
+    #     robot1_probs = robot1_policy[:valid_frontiers].copy()
+    #     robot2_probs = robot2_policy[:valid_frontiers].copy()
+        
+    #     # Handle numerical issues
+    #     robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
+    #     robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
+        
+    #     # Ensure probabilities sum to 1
+    #     robot1_sum = np.sum(robot1_probs)
+    #     robot2_sum = np.sum(robot2_probs)
+        
+    #     if robot1_sum > 0:
+    #         robot1_probs = robot1_probs / robot1_sum
+    #     else:
+    #         robot1_probs = np.ones(valid_frontiers) / valid_frontiers
+            
+    #     if robot2_sum > 0:
+    #         robot2_probs = robot2_probs / robot2_sum
+    #     else:
+    #         robot2_probs = np.ones(valid_frontiers) / valid_frontiers
+        
+    #     # Calculate policy entropy for dynamic temperature adjustment
+    #     def calculate_entropy(probs):
+    #         # Avoid log(0)
+    #         log_probs = np.log(probs + 1e-10)
+    #         entropy = -np.sum(probs * log_probs)
+    #         # Normalize entropy to 0-1 range
+    #         max_entropy = np.log(valid_frontiers)
+    #         normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
+    #         return normalized_entropy
+        
+    #     robot1_entropy = calculate_entropy(robot1_probs)
+    #     robot2_entropy = calculate_entropy(robot2_probs)
+        
+    #     # Dynamically adjust temperature based on training progress and entropy
+    #     base_temperature = self.get_dynamic_temperature()
+        
+    #     # Adjust based on entropy - increase temperature when entropy is low
+    #     robot1_temp = base_temperature * (1.0 + max(0, 0.5 - robot1_entropy) * 2)
+    #     robot2_temp = base_temperature * (1.0 + max(0, 0.5 - robot2_entropy) * 2)
+        
+    #     # Apply temperature to reshape probability distribution
+    #     def apply_temperature(probs, temperature):
+    #         # Higher temperature = flatter distribution (more exploration)
+    #         # Lower temperature = sharper distribution (more exploitation)
+    #         if temperature != 1.0:
+    #             logits = np.log(probs + 1e-10)
+    #             logits = logits / temperature
+    #             # Prevent overflow
+    #             logits = logits - np.max(logits)
+    #             exp_logits = np.exp(logits)
+    #             probs = exp_logits / np.sum(exp_logits)
+    #         return probs
+        
+    #     # Apply temperature
+    #     robot1_probs = apply_temperature(robot1_probs, robot1_temp)
+    #     robot2_probs = apply_temperature(robot2_probs, robot2_temp)
+        
+    #     # Avoid two robots choosing the same or nearby frontiers
+    #     # Let robot1 choose first
+    #     try:
+    #         robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+    #     except ValueError as e:
+    #         print(f"Robot1 sampling error: {str(e)}")
+    #         print(f"Robot1 probabilities: {robot1_probs}, sum: {np.sum(robot1_probs)}")
+    #         robot1_action = np.random.randint(valid_frontiers)
+        
+    #     # Then modify robot2's probabilities to reduce chance of choosing the same or nearby frontier
+    #     robot2_adjusted_probs = robot2_probs.copy()
+        
+    #     # Define proximity threshold
+    #     min_target_distance = self.robot1.sensor_range * 1.5
+        
+    #     # Adjust robot2's probabilities
+    #     for i in range(valid_frontiers):
+    #         if i == robot1_action:
+    #             # Significantly reduce probability of choosing the same point
+    #             robot2_adjusted_probs[i] *= 0.2
+    #         else:
+    #             # Calculate distance to robot1's chosen frontier
+    #             dist = np.linalg.norm(frontiers[i] - frontiers[robot1_action])
+    #             if dist < min_target_distance:
+    #                 # Reduce probability more for closer points
+    #                 reduction_factor = dist / min_target_distance
+    #                 robot2_adjusted_probs[i] *= max(0.2, reduction_factor)
+        
+    #     # Renormalize
+    #     robot2_sum = np.sum(robot2_adjusted_probs)
+    #     if robot2_sum > 0:
+    #         robot2_adjusted_probs = robot2_adjusted_probs / robot2_sum
+    #     else:
+    #         # Use uniform distribution if all probabilities are reduced to 0
+    #         robot2_adjusted_probs = np.ones(valid_frontiers) / valid_frontiers
+        
+    #     # Choose action for robot2
+    #     try:
+    #         robot2_action = np.random.choice(valid_frontiers, p=robot2_adjusted_probs)
+    #     except ValueError as e:
+    #         print(f"Robot2 sampling error: {str(e)}")
+    #         print(f"Robot2 adjusted probabilities: {robot2_adjusted_probs}, sum: {np.sum(robot2_adjusted_probs)}")
+    #         # Choose a different point than robot1 if possible
+    #         other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
+    #         if other_indices:
+    #             robot2_action = np.random.choice(other_indices)
+    #         else:
+    #             robot2_action = np.random.randint(valid_frontiers)
+        
+    #     return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
+
+
+
+
+
+
+
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
-                    robot1_target, robot2_target):
-        """Choose actions based on policy entropy and temperature sampling"""
+                        robot1_target, robot2_target):
+        """選擇動作，使用ε-greedy策略增加探索"""
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
-        # Prepare inputs
-        state_batch = np.expand_dims(state, 0).astype(np.float32)
-        frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0).astype(np.float32)
-        robot1_pos_batch = np.expand_dims(robot1_pos, 0).astype(np.float32)
-        robot2_pos_batch = np.expand_dims(robot2_pos, 0).astype(np.float32)
-        robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
-        robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
-        
-        # Determine valid frontier count
+        # 獲取有效frontier數量
         valid_frontiers = min(self.model.max_frontiers, len(frontiers))
         
-        # Get model predictions
-        try:
-            predictions = self.model.predict(
-                state_batch, 
-                frontiers_batch, 
-                robot1_pos_batch, 
-                robot2_pos_batch,
-                robot1_target_batch, 
-                robot2_target_batch
-            )
+        # ε-greedy策略：以epsilon的概率隨機探索，以1-epsilon的概率使用模型預測
+        if np.random.rand() < self.epsilon:
+            # 隨機探索 - 讓兩個機器人各自隨機選擇
+            robot1_action = np.random.randint(valid_frontiers)
+            robot2_action = np.random.randint(valid_frontiers)
             
-            robot1_policy = predictions['robot1_policy'][0]
-            robot2_policy = predictions['robot2_policy'][0]
-            robot1_value = float(predictions['robot1_value'][0][0])
-            robot2_value = float(predictions['robot2_value'][0][0])
-            robot1_logits = predictions['robot1_logits'][0]
-            robot2_logits = predictions['robot2_logits'][0]
-        except Exception as e:
-            print(f"Model prediction error: {str(e)}")
-            # Use uniform distribution if prediction fails
-            robot1_policy = np.ones(self.model.max_frontiers) / self.model.max_frontiers
-            robot2_policy = np.ones(self.model.max_frontiers) / self.model.max_frontiers
+            # 初始化默認價值和logits
             robot1_value = 0.0
             robot2_value = 0.0
             robot1_logits = np.zeros(self.model.max_frontiers)
             robot2_logits = np.zeros(self.model.max_frontiers)
-        
-        # Consider only valid frontiers
-        robot1_probs = robot1_policy[:valid_frontiers].copy()
-        robot2_probs = robot2_policy[:valid_frontiers].copy()
-        
-        # Handle numerical issues
-        robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
-        robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
-        
-        # Ensure probabilities sum to 1
-        robot1_sum = np.sum(robot1_probs)
-        robot2_sum = np.sum(robot2_probs)
-        
-        if robot1_sum > 0:
-            robot1_probs = robot1_probs / robot1_sum
-        else:
-            robot1_probs = np.ones(valid_frontiers) / valid_frontiers
             
-        if robot2_sum > 0:
-            robot2_probs = robot2_probs / robot2_sum
+            # 可以選擇性調用模型獲取價值估計，但不使用其策略選擇
+            try:
+                # 準備輸入
+                state_batch = np.expand_dims(state, 0).astype(np.float32)
+                frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0).astype(np.float32)
+                robot1_pos_batch = np.expand_dims(robot1_pos, 0).astype(np.float32)
+                robot2_pos_batch = np.expand_dims(robot2_pos, 0).astype(np.float32)
+                robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
+                robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
+                
+                # 獲取模型預測，僅用於價值估計
+                predictions = self.model.predict(
+                    state_batch, 
+                    frontiers_batch, 
+                    robot1_pos_batch, 
+                    robot2_pos_batch,
+                    robot1_target_batch, 
+                    robot2_target_batch
+                )
+                
+                robot1_value = float(predictions['robot1_value'][0][0])
+                robot2_value = float(predictions['robot2_value'][0][0])
+                robot1_logits = predictions['robot1_logits'][0]
+                robot2_logits = predictions['robot2_logits'][0]
+            except Exception as e:
+                print(f"模型預測錯誤 (探索模式): {str(e)}")
+                # 使用默認值
+                pass
         else:
-            robot2_probs = np.ones(valid_frontiers) / valid_frontiers
-        
-        # Calculate policy entropy for dynamic temperature adjustment
-        def calculate_entropy(probs):
-            # Avoid log(0)
-            log_probs = np.log(probs + 1e-10)
-            entropy = -np.sum(probs * log_probs)
-            # Normalize entropy to 0-1 range
-            max_entropy = np.log(valid_frontiers)
-            normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
-            return normalized_entropy
-        
-        robot1_entropy = calculate_entropy(robot1_probs)
-        robot2_entropy = calculate_entropy(robot2_probs)
-        
-        # Dynamically adjust temperature based on training progress and entropy
-        base_temperature = self.get_dynamic_temperature()
-        
-        # Adjust based on entropy - increase temperature when entropy is low
-        robot1_temp = base_temperature * (1.0 + max(0, 0.5 - robot1_entropy) * 2)
-        robot2_temp = base_temperature * (1.0 + max(0, 0.5 - robot2_entropy) * 2)
-        
-        # Apply temperature to reshape probability distribution
-        def apply_temperature(probs, temperature):
-            # Higher temperature = flatter distribution (more exploration)
-            # Lower temperature = sharper distribution (more exploitation)
-            if temperature != 1.0:
-                logits = np.log(probs + 1e-10)
-                logits = logits / temperature
-                # Prevent overflow
-                logits = logits - np.max(logits)
-                exp_logits = np.exp(logits)
-                probs = exp_logits / np.sum(exp_logits)
-            return probs
-        
-        # Apply temperature
-        robot1_probs = apply_temperature(robot1_probs, robot1_temp)
-        robot2_probs = apply_temperature(robot2_probs, robot2_temp)
-        
-        # Avoid two robots choosing the same or nearby frontiers
-        # Let robot1 choose first
-        try:
-            robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-        except ValueError as e:
-            print(f"Robot1 sampling error: {str(e)}")
-            print(f"Robot1 probabilities: {robot1_probs}, sum: {np.sum(robot1_probs)}")
-            robot1_action = np.random.randint(valid_frontiers)
-        
-        # Then modify robot2's probabilities to reduce chance of choosing the same or nearby frontier
-        robot2_adjusted_probs = robot2_probs.copy()
-        
-        # Define proximity threshold
-        min_target_distance = self.robot1.sensor_range * 1.5
-        
-        # Adjust robot2's probabilities
-        for i in range(valid_frontiers):
-            if i == robot1_action:
-                # Significantly reduce probability of choosing the same point
-                robot2_adjusted_probs[i] *= 0.2
-            else:
-                # Calculate distance to robot1's chosen frontier
-                dist = np.linalg.norm(frontiers[i] - frontiers[robot1_action])
-                if dist < min_target_distance:
-                    # Reduce probability more for closer points
-                    reduction_factor = dist / min_target_distance
-                    robot2_adjusted_probs[i] *= max(0.2, reduction_factor)
-        
-        # Renormalize
-        robot2_sum = np.sum(robot2_adjusted_probs)
-        if robot2_sum > 0:
-            robot2_adjusted_probs = robot2_adjusted_probs / robot2_sum
-        else:
-            # Use uniform distribution if all probabilities are reduced to 0
-            robot2_adjusted_probs = np.ones(valid_frontiers) / valid_frontiers
-        
-        # Choose action for robot2
-        try:
-            robot2_action = np.random.choice(valid_frontiers, p=robot2_adjusted_probs)
-        except ValueError as e:
-            print(f"Robot2 sampling error: {str(e)}")
-            print(f"Robot2 adjusted probabilities: {robot2_adjusted_probs}, sum: {np.sum(robot2_adjusted_probs)}")
-            # Choose a different point than robot1 if possible
-            other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
-            if other_indices:
-                robot2_action = np.random.choice(other_indices)
-            else:
+            # 利用當前策略 - 使用模型預測
+            try:
+                # 準備輸入
+                state_batch = np.expand_dims(state, 0).astype(np.float32)
+                frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0).astype(np.float32)
+                robot1_pos_batch = np.expand_dims(robot1_pos, 0).astype(np.float32)
+                robot2_pos_batch = np.expand_dims(robot2_pos, 0).astype(np.float32)
+                robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
+                robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
+                
+                # 獲取模型預測
+                predictions = self.model.predict(
+                    state_batch, 
+                    frontiers_batch, 
+                    robot1_pos_batch, 
+                    robot2_pos_batch,
+                    robot1_target_batch, 
+                    robot2_target_batch
+                )
+                
+                # 提取預測結果
+                robot1_policy = predictions['robot1_policy'][0]
+                robot2_policy = predictions['robot2_policy'][0]
+                robot1_value = float(predictions['robot1_value'][0][0])
+                robot2_value = float(predictions['robot2_value'][0][0])
+                robot1_logits = predictions['robot1_logits'][0]
+                robot2_logits = predictions['robot2_logits'][0]
+                
+                # 處理有效的frontier機率
+                robot1_probs = robot1_policy[:valid_frontiers].copy()
+                robot2_probs = robot2_policy[:valid_frontiers].copy()
+                
+                # 處理數值問題
+                robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
+                robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
+                
+                # 確保機率和為1
+                robot1_sum = np.sum(robot1_probs)
+                robot2_sum = np.sum(robot2_probs)
+                
+                if robot1_sum > 0:
+                    robot1_probs = robot1_probs / robot1_sum
+                else:
+                    robot1_probs = np.ones(valid_frontiers) / valid_frontiers
+                    
+                if robot2_sum > 0:
+                    robot2_probs = robot2_probs / robot2_sum
+                else:
+                    robot2_probs = np.ones(valid_frontiers) / valid_frontiers
+                
+                # 根據機率分布選擇動作
+                try:
+                    robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+                except ValueError as e:
+                    print(f"Robot1 抽樣錯誤: {str(e)}")
+                    print(f"Robot1 機率: {robot1_probs}, 和: {np.sum(robot1_probs)}")
+                    robot1_action = np.random.randint(valid_frontiers)
+                
+                try:
+                    robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
+                except ValueError as e:
+                    print(f"Robot2 抽樣錯誤: {str(e)}")
+                    print(f"Robot2 機率: {robot2_probs}, 和: {np.sum(robot2_probs)}")
+                    robot2_action = np.random.randint(valid_frontiers)
+                
+            except Exception as e:
+                print(f"模型預測錯誤 (利用模式): {str(e)}")
+                # 預測失敗時使用隨機策略
+                robot1_action = np.random.randint(valid_frontiers)
                 robot2_action = np.random.randint(valid_frontiers)
+                robot1_value = 0.0
+                robot2_value = 0.0
+                robot1_logits = np.zeros(self.model.max_frontiers)
+                robot2_logits = np.zeros(self.model.max_frontiers)
+        
+        # 動態減少epsilon，鼓勵逐漸從探索轉向利用
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
         
         return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
 
