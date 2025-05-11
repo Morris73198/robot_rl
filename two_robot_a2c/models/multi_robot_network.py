@@ -843,12 +843,12 @@ class MultiRobotA2CModel:
         }
         
         # 每隔一段時間打印一些訓練信息
-        if np.random.random() < 0.05:  # 5%的機率打印
-            print(f"\n訓練指標:")
-            print(f"Robot1熵: {entropy_1.numpy():.3f}, Robot2熵: {entropy_2.numpy():.3f}")
-            print(f"熵係數: {entropy_coef:.4f}")
-            print(f"協調損失: {coordination_loss.numpy():.4f}")
-            print(f"梯度範數: {grad_norm.numpy():.4f}")
+        # if np.random.random() < 0.05:  # 5%的機率打印
+        #     print(f"\n訓練指標:")
+        #     print(f"Robot1熵: {entropy_1.numpy():.3f}, Robot2熵: {entropy_2.numpy():.3f}")
+        #     print(f"熵係數: {entropy_coef:.4f}")
+        #     print(f"協調損失: {coordination_loss.numpy():.4f}")
+        #     print(f"梯度範數: {grad_norm.numpy():.4f}")
         
         return metrics
 
@@ -1131,11 +1131,11 @@ class MultiRobotA2CModel:
         normalized_advantages = np.clip(normalized_advantages, -max_value, max_value)
         
         # 周期性打印優勢函數統計信息，用於監控
-        if np.random.random() < 0.1:  # 10%的機率打印，減少日誌噪音
-            print(f"優勢函數統計: 均值={np.mean(normalized_advantages):.2f}, "
-                  f"標準差={np.std(normalized_advantages):.2f}, "
-                  f"最小值={np.min(normalized_advantages):.2f}, "
-                  f"最大值={np.max(normalized_advantages):.2f}")
+        # if np.random.random() < 0.1:  # 10%的機率打印，減少日誌噪音
+        #     print(f"優勢函數統計: 均值={np.mean(normalized_advantages):.2f}, "
+        #           f"標準差={np.std(normalized_advantages):.2f}, "
+        #           f"最小值={np.min(normalized_advantages):.2f}, "
+        #           f"最大值={np.max(normalized_advantages):.2f}")
         
         return returns, normalized_advantages
     

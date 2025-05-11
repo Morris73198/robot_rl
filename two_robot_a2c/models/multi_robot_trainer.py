@@ -304,12 +304,12 @@ class MultiRobotA2CTrainer:
                 robot2_action = np.random.randint(valid_frontiers)
         
         # 輸出一些調試信息，觀察溫度和熵的關係
-        if np.random.random() < 0.01:  # 只有1%的機會打印，避免信息過多
-            print(f"\n溫度採樣調試信息:")
-            print(f"Robot1熵: {robot1_entropy:.3f}, 溫度: {robot1_temp:.3f}")
-            print(f"Robot2熵: {robot2_entropy:.3f}, 溫度: {robot2_temp:.3f}")
-            print(f"Robot1熵/溫度比: {robot1_entropy/robot1_temp:.3f}")
-            print(f"Robot2熵/溫度比: {robot2_entropy/robot2_temp:.3f}")
+        # if np.random.random() < 0.01:  # 只有1%的機會打印，避免信息過多
+        #     print(f"\n溫度採樣調試信息:")
+        #     print(f"Robot1熵: {robot1_entropy:.3f}, 溫度: {robot1_temp:.3f}")
+        #     print(f"Robot2熵: {robot2_entropy:.3f}, 溫度: {robot2_temp:.3f}")
+        #     print(f"Robot1熵/溫度比: {robot1_entropy/robot1_temp:.3f}")
+        #     print(f"Robot2熵/溫度比: {robot2_entropy/robot2_temp:.3f}")
         
         return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
 
@@ -415,11 +415,11 @@ class MultiRobotA2CTrainer:
         final_advantages = clipped_advantages * scale_factor
         
         # 統計信息
-        if np.random.random() < 0.05:  # 只有5%的機率打印，減少輸出過多
-            print(f"\n優勢函數統計:")
-            print(f"原始優勢 - 均值: {np.mean(advantages):.3f}, 標準差: {np.std(advantages):.3f}")
-            print(f"標準化優勢 - 均值: {np.mean(final_advantages):.3f}, 標準差: {np.std(final_advantages):.3f}")
-            print(f"極值 - 最小值: {np.min(final_advantages):.3f}, 最大值: {np.max(final_advantages):.3f}")
+        # if np.random.random() < 0.05:  # 只有5%的機率打印，減少輸出過多
+        #     print(f"\n優勢函數統計:")
+        #     print(f"原始優勢 - 均值: {np.mean(advantages):.3f}, 標準差: {np.std(advantages):.3f}")
+        #     print(f"標準化優勢 - 均值: {np.mean(final_advantages):.3f}, 標準差: {np.std(final_advantages):.3f}")
+        #     print(f"極值 - 最小值: {np.min(final_advantages):.3f}, 最大值: {np.max(final_advantages):.3f}")
         
         return returns, final_advantages
 
