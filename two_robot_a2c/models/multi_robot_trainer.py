@@ -151,12 +151,212 @@ class MultiRobotA2CTrainer:
     
 
 
+    # def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
+    #                 robot1_target, robot2_target):
+    #     """基於策略熵和溫度採樣的動作選擇，不使用ε-greedy策略"""
+    #     if len(frontiers) == 0:
+    #         return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
+        
+    #     # 準備輸入
+    #     state_batch = np.expand_dims(state, 0).astype(np.float32)
+    #     frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0).astype(np.float32)
+    #     robot1_pos_batch = np.expand_dims(robot1_pos, 0).astype(np.float32)
+    #     robot2_pos_batch = np.expand_dims(robot2_pos, 0).astype(np.float32)
+    #     robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
+    #     robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
+        
+    #     # 確定有效前沿點數量
+    #     valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+        
+    #     # 獲取模型預測
+    #     try:
+    #         predictions = self.model.predict(
+    #             state_batch, 
+    #             frontiers_batch, 
+    #             robot1_pos_batch, 
+    #             robot2_pos_batch,
+    #             robot1_target_batch, 
+    #             robot2_target_batch
+    #         )
+            
+    #         robot1_policy = predictions['robot1_policy'][0]
+    #         robot2_policy = predictions['robot2_policy'][0]
+    #         robot1_value = float(predictions['robot1_value'][0][0])
+    #         robot2_value = float(predictions['robot2_value'][0][0])
+    #         robot1_logits = predictions['robot1_logits'][0]
+    #         robot2_logits = predictions['robot2_logits'][0]
+    #     except Exception as e:
+    #         print(f"模型預測錯誤: {str(e)}")
+    #         # 預測失敗時使用均勻分布
+    #         robot1_policy = np.ones(self.model.max_frontiers) / self.model.max_frontiers
+    #         robot2_policy = np.ones(self.model.max_frontiers) / self.model.max_frontiers
+    #         robot1_value = 0.0
+    #         robot2_value = 0.0
+    #         robot1_logits = np.zeros(self.model.max_frontiers)
+    #         robot2_logits = np.zeros(self.model.max_frontiers)
+        
+    #     # 只考慮有效的前沿點
+    #     robot1_probs = robot1_policy[:valid_frontiers].copy()
+    #     robot2_probs = robot2_policy[:valid_frontiers].copy()
+        
+    #     # 處理數值問題
+    #     robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
+    #     robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
+        
+    #     # 確保概率和為1
+    #     robot1_sum = np.sum(robot1_probs)
+    #     robot2_sum = np.sum(robot2_probs)
+        
+    #     if robot1_sum > 0:
+    #         robot1_probs = robot1_probs / robot1_sum
+    #     else:
+    #         robot1_probs = np.ones(valid_frontiers) / valid_frontiers
+            
+    #     if robot2_sum > 0:
+    #         robot2_probs = robot2_probs / robot2_sum
+    #     else:
+    #         robot2_probs = np.ones(valid_frontiers) / valid_frontiers
+        
+    #     # 計算策略熵，用於動態調整溫度
+    #     def calculate_entropy(probs):
+    #         # 避免log(0)
+    #         log_probs = np.log(probs + 1e-10)
+    #         entropy = -np.sum(probs * log_probs)
+    #         # 正規化熵值到0-1範圍
+    #         max_entropy = np.log(valid_frontiers)
+    #         normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
+    #         return normalized_entropy
+        
+    #     robot1_entropy = calculate_entropy(robot1_probs)
+    #     robot2_entropy = calculate_entropy(robot2_probs)
+        
+    #     # 根據訓練進度和策略熵動態調整溫度
+    #     base_temperature = self.get_dynamic_temperature()
+        
+    #     # 根據熵調整，熵低時提高溫度
+    #     robot1_temp = base_temperature * (1.0 + max(0, 0.5 - robot1_entropy) * 2)
+    #     robot2_temp = base_temperature * (1.0 + max(0, 0.5 - robot2_entropy) * 2)
+        
+    #     # 使用溫度重塑概率分布
+    #     def apply_temperature(probs, temperature):
+    #         # 溫度越高，分布越平坦（更多探索）
+    #         # 溫度越低，分布越尖銳（更多利用）
+    #         if temperature != 1.0:
+    #             logits = np.log(probs + 1e-10)
+    #             logits = logits / temperature
+    #             # 防止溢出
+    #             logits = logits - np.max(logits)
+    #             exp_logits = np.exp(logits)
+    #             probs = exp_logits / np.sum(exp_logits)
+    #         return probs
+        
+    #     # 應用溫度
+    #     robot1_probs = apply_temperature(robot1_probs, robot1_temp)
+    #     robot2_probs = apply_temperature(robot2_probs, robot2_temp)
+        
+    #     # 避免兩個機器人選擇相同或接近的frontier
+    #     # 先讓robot1選擇
+    #     try:
+    #         robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+    #     except ValueError as e:
+    #         print(f"Robot1採樣出錯: {str(e)}")
+    #         print(f"Robot1概率: {robot1_probs}, 和: {np.sum(robot1_probs)}")
+    #         robot1_action = np.random.randint(valid_frontiers)
+        
+    #     # 然後修改robot2的概率，降低選擇相同或接近frontier的機會
+    #     robot2_adjusted_probs = robot2_probs.copy()
+        
+    #     # 定義接近的閾值
+    #     min_target_distance = self.robot1.sensor_range * 1.5
+        
+    #     # 調整robot2的概率
+    #     for i in range(valid_frontiers):
+    #         if i == robot1_action:
+    #             # 大幅降低選擇相同點的概率
+    #             robot2_adjusted_probs[i] *= 0.2
+    #         else:
+    #             # 計算與robot1所選frontier的距離
+    #             dist = np.linalg.norm(frontiers[i] - frontiers[robot1_action])
+    #             if dist < min_target_distance:
+    #                 # 距離越近，降低的概率越多
+    #                 reduction_factor = dist / min_target_distance
+    #                 robot2_adjusted_probs[i] *= max(0.2, reduction_factor)
+        
+    #     # 重新歸一化
+    #     robot2_sum = np.sum(robot2_adjusted_probs)
+    #     if robot2_sum > 0:
+    #         robot2_adjusted_probs = robot2_adjusted_probs / robot2_sum
+    #     else:
+    #         # 如果所有概率都被降為0，則使用均勻分布
+    #         robot2_adjusted_probs = np.ones(valid_frontiers) / valid_frontiers
+        
+    #     # 為robot2選擇動作
+    #     try:
+    #         robot2_action = np.random.choice(valid_frontiers, p=robot2_adjusted_probs)
+    #     except ValueError as e:
+    #         print(f"Robot2採樣出錯: {str(e)}")
+    #         print(f"Robot2調整後概率: {robot2_adjusted_probs}, 和: {np.sum(robot2_adjusted_probs)}")
+    #         # 選擇一個與robot1不同的點
+    #         other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
+    #         if other_indices:
+    #             robot2_action = np.random.choice(other_indices)
+    #         else:
+    #             robot2_action = np.random.randint(valid_frontiers)
+        
+    #     # 輸出一些調試信息，觀察溫度和熵的關係
+    #     # if np.random.random() < 0.01:  # 只有1%的機會打印，避免信息過多
+    #     #     print(f"\n溫度採樣調試信息:")
+    #     #     print(f"Robot1熵: {robot1_entropy:.3f}, 溫度: {robot1_temp:.3f}")
+    #     #     print(f"Robot2熵: {robot2_entropy:.3f}, 溫度: {robot2_temp:.3f}")
+    #     #     print(f"Robot1熵/溫度比: {robot1_entropy/robot1_temp:.3f}")
+    #     #     print(f"Robot2熵/溫度比: {robot2_entropy/robot2_temp:.3f}")
+        
+    #     return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
+
+
+
+
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target):
-        """基於策略熵和溫度採樣的動作選擇，不使用ε-greedy策略"""
+        """基於ε-greedy策略的動作選擇，允許隨機探索
+        
+        Args:
+            state: 環境狀態
+            frontiers: 前沿點列表
+            robot1_pos: 機器人1的位置
+            robot2_pos: 機器人2的位置
+            robot1_target: 機器人1的目標位置
+            robot2_target: 機器人2的目標位置
+            
+        Returns:
+            robot1_action: 機器人1選擇的動作
+            robot2_action: 機器人2選擇的動作
+            robot1_value: 機器人1的狀態價值
+            robot2_value: 機器人2的狀態價值
+            robot1_logits: 機器人1的策略邏輯值
+            robot2_logits: 機器人2的策略邏輯值
+        """
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
+        # 確定有效前沿點數量
+        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
+        
+        # ε-greedy策略 - 使用self.epsilon作為隨機探索的概率
+        if np.random.random() < self.epsilon:
+            # 隨機探索 - 完全隨機選擇動作
+            robot1_action = np.random.randint(valid_frontiers)
+            robot2_action = np.random.randint(valid_frontiers)
+            
+            # 設置均勻分布的邏輯值和策略值用於存儲
+            robot1_logits = np.zeros(self.model.max_frontiers)
+            robot2_logits = np.zeros(self.model.max_frontiers)
+            robot1_value = 0.0
+            robot2_value = 0.0
+            
+            return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
+        
+        # 否則使用模型預測
         # 準備輸入
         state_batch = np.expand_dims(state, 0).astype(np.float32)
         frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0).astype(np.float32)
@@ -164,9 +364,6 @@ class MultiRobotA2CTrainer:
         robot2_pos_batch = np.expand_dims(robot2_pos, 0).astype(np.float32)
         robot1_target_batch = np.expand_dims(robot1_target, 0).astype(np.float32)
         robot2_target_batch = np.expand_dims(robot2_target, 0).astype(np.float32)
-        
-        # 確定有效前沿點數量
-        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
         
         # 獲取模型預測
         try:
@@ -217,45 +414,24 @@ class MultiRobotA2CTrainer:
         else:
             robot2_probs = np.ones(valid_frontiers) / valid_frontiers
         
-        # 計算策略熵，用於動態調整溫度
-        def calculate_entropy(probs):
-            # 避免log(0)
-            log_probs = np.log(probs + 1e-10)
-            entropy = -np.sum(probs * log_probs)
-            # 正規化熵值到0-1範圍
-            max_entropy = np.log(valid_frontiers)
-            normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
-            return normalized_entropy
-        
-        robot1_entropy = calculate_entropy(robot1_probs)
-        robot2_entropy = calculate_entropy(robot2_probs)
-        
-        # 根據訓練進度和策略熵動態調整溫度
-        base_temperature = self.get_dynamic_temperature()
-        
-        # 根據熵調整，熵低時提高溫度
-        robot1_temp = base_temperature * (1.0 + max(0, 0.5 - robot1_entropy) * 2)
-        robot2_temp = base_temperature * (1.0 + max(0, 0.5 - robot2_entropy) * 2)
+        # 溫度係數 - 固定值或根據訓練進度動態調整
+        temperature = 1.0
         
         # 使用溫度重塑概率分布
         def apply_temperature(probs, temperature):
-            # 溫度越高，分布越平坦（更多探索）
-            # 溫度越低，分布越尖銳（更多利用）
             if temperature != 1.0:
                 logits = np.log(probs + 1e-10)
                 logits = logits / temperature
-                # 防止溢出
-                logits = logits - np.max(logits)
+                logits = logits - np.max(logits)  # 防止溢出
                 exp_logits = np.exp(logits)
                 probs = exp_logits / np.sum(exp_logits)
             return probs
         
         # 應用溫度
-        robot1_probs = apply_temperature(robot1_probs, robot1_temp)
-        robot2_probs = apply_temperature(robot2_probs, robot2_temp)
+        robot1_probs = apply_temperature(robot1_probs, temperature)
+        robot2_probs = apply_temperature(robot2_probs, temperature)
         
-        # 避免兩個機器人選擇相同或接近的frontier
-        # 先讓robot1選擇
+        # 根據概率分布采樣動作
         try:
             robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
         except ValueError as e:
@@ -263,53 +439,12 @@ class MultiRobotA2CTrainer:
             print(f"Robot1概率: {robot1_probs}, 和: {np.sum(robot1_probs)}")
             robot1_action = np.random.randint(valid_frontiers)
         
-        # 然後修改robot2的概率，降低選擇相同或接近frontier的機會
-        robot2_adjusted_probs = robot2_probs.copy()
-        
-        # 定義接近的閾值
-        min_target_distance = self.robot1.sensor_range * 1.5
-        
-        # 調整robot2的概率
-        for i in range(valid_frontiers):
-            if i == robot1_action:
-                # 大幅降低選擇相同點的概率
-                robot2_adjusted_probs[i] *= 0.2
-            else:
-                # 計算與robot1所選frontier的距離
-                dist = np.linalg.norm(frontiers[i] - frontiers[robot1_action])
-                if dist < min_target_distance:
-                    # 距離越近，降低的概率越多
-                    reduction_factor = dist / min_target_distance
-                    robot2_adjusted_probs[i] *= max(0.2, reduction_factor)
-        
-        # 重新歸一化
-        robot2_sum = np.sum(robot2_adjusted_probs)
-        if robot2_sum > 0:
-            robot2_adjusted_probs = robot2_adjusted_probs / robot2_sum
-        else:
-            # 如果所有概率都被降為0，則使用均勻分布
-            robot2_adjusted_probs = np.ones(valid_frontiers) / valid_frontiers
-        
-        # 為robot2選擇動作
         try:
-            robot2_action = np.random.choice(valid_frontiers, p=robot2_adjusted_probs)
+            robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
         except ValueError as e:
             print(f"Robot2採樣出錯: {str(e)}")
-            print(f"Robot2調整後概率: {robot2_adjusted_probs}, 和: {np.sum(robot2_adjusted_probs)}")
-            # 選擇一個與robot1不同的點
-            other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
-            if other_indices:
-                robot2_action = np.random.choice(other_indices)
-            else:
-                robot2_action = np.random.randint(valid_frontiers)
-        
-        # 輸出一些調試信息，觀察溫度和熵的關係
-        # if np.random.random() < 0.01:  # 只有1%的機會打印，避免信息過多
-        #     print(f"\n溫度採樣調試信息:")
-        #     print(f"Robot1熵: {robot1_entropy:.3f}, 溫度: {robot1_temp:.3f}")
-        #     print(f"Robot2熵: {robot2_entropy:.3f}, 溫度: {robot2_temp:.3f}")
-        #     print(f"Robot1熵/溫度比: {robot1_entropy/robot1_temp:.3f}")
-        #     print(f"Robot2熵/溫度比: {robot2_entropy/robot2_temp:.3f}")
+            print(f"Robot2概率: {robot2_probs}, 和: {np.sum(robot2_probs)}")
+            robot2_action = np.random.randint(valid_frontiers)
         
         return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
 
