@@ -153,7 +153,7 @@ class MultiRobotA2CTrainer:
 
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target):
-        """基於策略機率選擇動作，不添加額外人工規則"""
+        """基於策略熵和溫度採樣的動作選擇，不使用ε-greedy策略"""
         if len(frontiers) == 0:
             return 0, 0, 0.0, 0.0, np.zeros(self.model.max_frontiers), np.zeros(self.model.max_frontiers)
         
@@ -217,29 +217,148 @@ class MultiRobotA2CTrainer:
         else:
             robot2_probs = np.ones(valid_frontiers) / valid_frontiers
         
-        # 根據是否使用epsilon-greedy策略決定動作選擇方式
-        if np.random.random() < self.epsilon:
-            # 探索模式：完全隨機選擇，不基於模型輸出
+        # 計算策略熵，用於動態調整溫度
+        def calculate_entropy(probs):
+            # 避免log(0)
+            log_probs = np.log(probs + 1e-10)
+            entropy = -np.sum(probs * log_probs)
+            # 正規化熵值到0-1範圍
+            max_entropy = np.log(valid_frontiers)
+            normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
+            return normalized_entropy
+        
+        robot1_entropy = calculate_entropy(robot1_probs)
+        robot2_entropy = calculate_entropy(robot2_probs)
+        
+        # 根據訓練進度和策略熵動態調整溫度
+        base_temperature = self.get_dynamic_temperature()
+        
+        # 根據熵調整，熵低時提高溫度
+        robot1_temp = base_temperature * (1.0 + max(0, 0.5 - robot1_entropy) * 2)
+        robot2_temp = base_temperature * (1.0 + max(0, 0.5 - robot2_entropy) * 2)
+        
+        # 使用溫度重塑概率分布
+        def apply_temperature(probs, temperature):
+            # 溫度越高，分布越平坦（更多探索）
+            # 溫度越低，分布越尖銳（更多利用）
+            if temperature != 1.0:
+                logits = np.log(probs + 1e-10)
+                logits = logits / temperature
+                # 防止溢出
+                logits = logits - np.max(logits)
+                exp_logits = np.exp(logits)
+                probs = exp_logits / np.sum(exp_logits)
+            return probs
+        
+        # 應用溫度
+        robot1_probs = apply_temperature(robot1_probs, robot1_temp)
+        robot2_probs = apply_temperature(robot2_probs, robot2_temp)
+        
+        # 避免兩個機器人選擇相同或接近的frontier
+        # 先讓robot1選擇
+        try:
+            robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+        except ValueError as e:
+            print(f"Robot1採樣出錯: {str(e)}")
+            print(f"Robot1概率: {robot1_probs}, 和: {np.sum(robot1_probs)}")
             robot1_action = np.random.randint(valid_frontiers)
-            
-            # Robot2也完全隨機選擇
-            robot2_action = np.random.randint(valid_frontiers)
+        
+        # 然後修改robot2的概率，降低選擇相同或接近frontier的機會
+        robot2_adjusted_probs = robot2_probs.copy()
+        
+        # 定義接近的閾值
+        min_target_distance = self.robot1.sensor_range * 1.5
+        
+        # 調整robot2的概率
+        for i in range(valid_frontiers):
+            if i == robot1_action:
+                # 大幅降低選擇相同點的概率
+                robot2_adjusted_probs[i] *= 0.2
+            else:
+                # 計算與robot1所選frontier的距離
+                dist = np.linalg.norm(frontiers[i] - frontiers[robot1_action])
+                if dist < min_target_distance:
+                    # 距離越近，降低的概率越多
+                    reduction_factor = dist / min_target_distance
+                    robot2_adjusted_probs[i] *= max(0.2, reduction_factor)
+        
+        # 重新歸一化
+        robot2_sum = np.sum(robot2_adjusted_probs)
+        if robot2_sum > 0:
+            robot2_adjusted_probs = robot2_adjusted_probs / robot2_sum
         else:
-            # 利用模式：完全基於策略網絡的輸出
-            # 使用策略機率進行採樣，而不是直接選擇最高概率的動作
-            try:
-                robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-                robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
-            except ValueError as e:
-                print(f"採樣策略時出錯: {str(e)}")
-                print(f"robot1_probs: {robot1_probs}, sum: {np.sum(robot1_probs)}")
-                print(f"robot2_probs: {robot2_probs}, sum: {np.sum(robot2_probs)}")
-                
-                # 發生錯誤時回退到均勻採樣
-                robot1_action = np.random.randint(valid_frontiers)
+            # 如果所有概率都被降為0，則使用均勻分布
+            robot2_adjusted_probs = np.ones(valid_frontiers) / valid_frontiers
+        
+        # 為robot2選擇動作
+        try:
+            robot2_action = np.random.choice(valid_frontiers, p=robot2_adjusted_probs)
+        except ValueError as e:
+            print(f"Robot2採樣出錯: {str(e)}")
+            print(f"Robot2調整後概率: {robot2_adjusted_probs}, 和: {np.sum(robot2_adjusted_probs)}")
+            # 選擇一個與robot1不同的點
+            other_indices = [i for i in range(valid_frontiers) if i != robot1_action]
+            if other_indices:
+                robot2_action = np.random.choice(other_indices)
+            else:
                 robot2_action = np.random.randint(valid_frontiers)
         
+        # 輸出一些調試信息，觀察溫度和熵的關係
+        if np.random.random() < 0.01:  # 只有1%的機會打印，避免信息過多
+            print(f"\n溫度採樣調試信息:")
+            print(f"Robot1熵: {robot1_entropy:.3f}, 溫度: {robot1_temp:.3f}")
+            print(f"Robot2熵: {robot2_entropy:.3f}, 溫度: {robot2_temp:.3f}")
+            print(f"Robot1熵/溫度比: {robot1_entropy/robot1_temp:.3f}")
+            print(f"Robot2熵/溫度比: {robot2_entropy/robot2_temp:.3f}")
+        
         return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
+
+    def get_dynamic_temperature(self):
+        """根據訓練進度動態調整溫度參數"""
+        # 取得目前訓練進度的估計
+        if len(self.training_history['episode_rewards']) < 10:
+            # 訓練初期，使用高溫度促進探索
+            return 2.0
+        
+        # 計算近期表現的改善程度
+        recent_rewards = self.training_history['episode_rewards'][-10:]
+        recent_avg = np.mean(recent_rewards)
+        
+        if len(self.training_history['episode_rewards']) >= 20:
+            previous_rewards = self.training_history['episode_rewards'][-20:-10]
+            previous_avg = np.mean(previous_rewards)
+            
+            # 如果表現有所改善，減小溫度（更多利用）
+            # 如果表現沒有改善，增加溫度（更多探索）
+            improvement = (recent_avg - previous_avg) / (abs(previous_avg) + 1e-8)
+            
+            if improvement > 0.1:  # 表現明顯改善
+                temperature = 0.8  # 降低溫度，增加利用
+            elif improvement < -0.05:  # 表現下降
+                temperature = 1.5  # 提高溫度，增加探索
+            else:  # 表現穩定
+                temperature = 1.0
+        else:
+            # 數據不足，使用適中溫度
+            temperature = 1.0
+        
+        # 如果發現長期停滯，則週期性地增加溫度
+        episodes = len(self.training_history['episode_rewards'])
+        if episodes % 100 == 0 and episodes > 0:
+            # 計算最近100輪和前100輪的平均獎勵
+            if episodes >= 200:
+                recent_100 = np.mean(self.training_history['episode_rewards'][-100:])
+                previous_100 = np.mean(self.training_history['episode_rewards'][-200:-100])
+                
+                # 如果近期表現沒有明顯改善，提高溫度
+                if recent_100 <= previous_100 * 1.05:
+                    temperature = max(2.0, temperature * 1.5)
+                    print(f"檢測到訓練停滯，增加溫度至 {temperature:.2f} 以增強探索")
+        
+        # 限制溫度的範圍，避免極端值
+        temperature = np.clip(temperature, 0.5, 3.0)
+        
+        return temperature
 
 
 
@@ -247,19 +366,19 @@ class MultiRobotA2CTrainer:
 
 
     def compute_returns_and_advantages(self, rewards, values, dones, next_value):
-        """更穩定的回報和優勢計算"""
+        """改進的廣義優勢估計 (GAE) 計算"""
         returns = np.zeros_like(rewards)
         advantages = np.zeros_like(rewards)
         
         gae = 0
         
-        # 保持合理的獎勵尺度
+        # 保持合理的獎勵尺度，避免數值不穩定
         reward_scale = 1.0
         scaled_rewards = rewards * reward_scale
         
         # GAE參數
-        gamma = self.gamma
-        lambda_param = 0.95
+        gamma = 0.99  # 折扣因子
+        lambda_param = 0.95  # GAE平衡參數
         
         # 從後向前計算
         for t in reversed(range(len(rewards))):
@@ -284,17 +403,25 @@ class MultiRobotA2CTrainer:
         adv_mean = np.mean(advantages)
         adv_std = np.std(advantages) + 1e-8
         
-        # 標準化
+        # 標準化優勢，使其均值為0，標準差為1
         normalized_advantages = (advantages - adv_mean) / adv_std
         
         # 限制範圍，避免極端值
-        normalized_advantages = np.clip(normalized_advantages, -3.0, 3.0)
+        clip_range = 3.0  # 較寬的範圍仍然能保留一些極端信號
+        clipped_advantages = np.clip(normalized_advantages, -clip_range, clip_range)
         
-        # 適當放大
-        advantages_scale = 5.0
-        scaled_advantages = normalized_advantages * advantages_scale
+        # 保留適中的優勢強度，避免過度縮放
+        scale_factor = 1.0
+        final_advantages = clipped_advantages * scale_factor
         
-        return returns, scaled_advantages
+        # 統計信息
+        if np.random.random() < 0.05:  # 只有5%的機率打印，減少輸出過多
+            print(f"\n優勢函數統計:")
+            print(f"原始優勢 - 均值: {np.mean(advantages):.3f}, 標準差: {np.std(advantages):.3f}")
+            print(f"標準化優勢 - 均值: {np.mean(final_advantages):.3f}, 標準差: {np.std(final_advantages):.3f}")
+            print(f"極值 - 最小值: {np.min(final_advantages):.3f}, 最大值: {np.max(final_advantages):.3f}")
+        
+        return returns, final_advantages
 
     
     def process_trajectory(self, last_robot1_value=0, last_robot2_value=0):
@@ -345,7 +472,8 @@ class MultiRobotA2CTrainer:
             robot1_old_values=robot1_values,
             robot2_old_values=robot2_values,
             robot1_old_logits=robot1_logits,
-            robot2_old_logits=robot2_logits
+            robot2_old_logits=robot2_logits,
+            training_history=self.training_history
         )
         
         return loss_metrics
@@ -558,20 +686,110 @@ class MultiRobotA2CTrainer:
                             # 如果回合結束，最後狀態的價值為0
                             last_robot1_value = 0
                             last_robot2_value = 0
-                            
-                        # 處理軌跡並訓練
-                        loss_metrics = self.process_trajectory(last_robot1_value, last_robot2_value)
                         
-                        if loss_metrics:
-                            episode_losses.append(loss_metrics['total_loss'].numpy())
+                        # 處理軌跡得到訓練數據
+                        returns_metrics = self.process_trajectory(last_robot1_value, last_robot2_value)
+                        
+                        # 使用PPO風格的多次更新
+                        if len(self.trajectory_buffer['states']) >= self.batch_size:
+                            # 獲取經過處理的訓練數據
+                            train_states = np.array(self.trajectory_buffer['states'], dtype=np.float32)
+                            train_frontiers = np.array(self.trajectory_buffer['frontiers'], dtype=np.float32)
+                            train_robot1_pos = np.array(self.trajectory_buffer['robot1_pos'], dtype=np.float32)
+                            train_robot2_pos = np.array(self.trajectory_buffer['robot2_pos'], dtype=np.float32)
+                            train_robot1_target = np.array(self.trajectory_buffer['robot1_target'], dtype=np.float32)
+                            train_robot2_target = np.array(self.trajectory_buffer['robot2_target'], dtype=np.float32)
+                            train_robot1_actions = np.array(self.trajectory_buffer['robot1_actions'], dtype=np.int32)
+                            train_robot2_actions = np.array(self.trajectory_buffer['robot2_actions'], dtype=np.int32)
                             
-                            # 記錄額外的指標
-                            self.training_history['robot1_entropy'].append(loss_metrics['robot1_entropy'].numpy())
-                            self.training_history['robot2_entropy'].append(loss_metrics['robot2_entropy'].numpy())
-                            self.training_history['robot1_value_loss'].append(loss_metrics['robot1_value_loss'].numpy())
-                            self.training_history['robot2_value_loss'].append(loss_metrics['robot2_value_loss'].numpy())
-                            self.training_history['robot1_policy_loss'].append(loss_metrics['robot1_policy_loss'].numpy())
-                            self.training_history['robot2_policy_loss'].append(loss_metrics['robot2_policy_loss'].numpy())
+                            # 計算回報和優勢
+                            robot1_rewards = np.array(self.trajectory_buffer['robot1_rewards'], dtype=np.float32)
+                            robot2_rewards = np.array(self.trajectory_buffer['robot2_rewards'], dtype=np.float32)
+                            robot1_values = np.array(self.trajectory_buffer['robot1_values'], dtype=np.float32)
+                            robot2_values = np.array(self.trajectory_buffer['robot2_values'], dtype=np.float32)
+                            dones = np.array(self.trajectory_buffer['dones'], dtype=np.float32)
+                            
+                            robot1_returns, robot1_advantages = self.compute_returns_and_advantages(
+                                robot1_rewards, robot1_values, dones, last_robot1_value
+                            )
+                            
+                            robot2_returns, robot2_advantages = self.compute_returns_and_advantages(
+                                robot2_rewards, robot2_values, dones, last_robot2_value
+                            )
+                            
+                            # 保存舊的logits和策略
+                            robot1_old_logits = np.array(self.trajectory_buffer['robot1_logits'], dtype=np.float32)
+                            robot2_old_logits = np.array(self.trajectory_buffer['robot2_logits'], dtype=np.float32)
+                            
+                            # 多次更新循環（PPO風格）
+                            n_updates = 4  # 每批數據更新的次數
+                            ppo_losses = []
+
+                            for update_idx in range(n_updates):
+                                # 隨機抽樣小批次
+                                batch_indices = np.random.permutation(len(train_states))[:min(32, len(train_states))]
+                                
+                                # 準備小批次數據
+                                batch_states = train_states[batch_indices]
+                                batch_frontiers = train_frontiers[batch_indices]
+                                batch_robot1_pos = train_robot1_pos[batch_indices]
+                                batch_robot2_pos = train_robot2_pos[batch_indices]
+                                batch_robot1_target = train_robot1_target[batch_indices]
+                                batch_robot2_target = train_robot2_target[batch_indices]
+                                batch_robot1_actions = train_robot1_actions[batch_indices]
+                                batch_robot2_actions = train_robot2_actions[batch_indices]
+                                batch_robot1_advantages = robot1_advantages[batch_indices]
+                                batch_robot2_advantages = robot2_advantages[batch_indices]
+                                batch_robot1_returns = robot1_returns[batch_indices]
+                                batch_robot2_returns = robot2_returns[batch_indices]
+                                batch_robot1_old_logits = robot1_old_logits[batch_indices]
+                                batch_robot2_old_logits = robot2_old_logits[batch_indices]
+                                
+                                # 當前回合數
+                                current_episode = len(self.training_history['episode_rewards'])
+                                
+                                # 訓練actor
+                                actor_metrics = self.model.train_actor(
+                                    batch_states, batch_frontiers, 
+                                    batch_robot1_pos, batch_robot2_pos,
+                                    batch_robot1_target, batch_robot2_target,
+                                    batch_robot1_actions, batch_robot2_actions,
+                                    batch_robot1_advantages, batch_robot2_advantages,
+                                    batch_robot1_old_logits, batch_robot2_old_logits,
+                                    self.training_history, current_episode  # 傳遞訓練歷史和當前回合數
+                                )
+                                
+                                # 訓練critic
+                                critic_metrics = self.model.train_critic(
+                                    batch_states, batch_frontiers,
+                                    batch_robot1_pos, batch_robot2_pos,
+                                    batch_robot1_target, batch_robot2_target,
+                                    batch_robot1_returns, batch_robot2_returns
+                                )
+                                
+                                # 記錄損失
+                                ppo_losses.append(actor_metrics['total_policy_loss'] + critic_metrics['total_value_loss'])
+                            
+                            # 記錄平均損失
+                            if ppo_losses:
+                                loss_metrics = {
+                                    'total_loss': np.mean(ppo_losses),
+                                    'robot1_entropy': actor_metrics['robot1_entropy'],
+                                    'robot2_entropy': actor_metrics['robot2_entropy'],
+                                    'robot1_value_loss': critic_metrics['robot1_value_loss'],
+                                    'robot2_value_loss': critic_metrics['robot2_value_loss'],
+                                    'robot1_policy_loss': actor_metrics['robot1_policy_loss'],
+                                    'robot2_policy_loss': actor_metrics['robot2_policy_loss']
+                                }
+                                episode_losses.append(float(loss_metrics['total_loss']) if hasattr(loss_metrics['total_loss'], 'numpy') else loss_metrics['total_loss'])
+                                
+                                # 記錄熵相關的指標
+                                self.training_history['robot1_entropy'].append(loss_metrics['robot1_entropy'].numpy())
+                                self.training_history['robot2_entropy'].append(loss_metrics['robot2_entropy'].numpy())
+                                self.training_history['robot1_value_loss'].append(loss_metrics['robot1_value_loss'].numpy())
+                                self.training_history['robot2_value_loss'].append(loss_metrics['robot2_value_loss'].numpy())
+                                self.training_history['robot1_policy_loss'].append(loss_metrics['robot1_policy_loss'].numpy())
+                                self.training_history['robot2_policy_loss'].append(loss_metrics['robot2_policy_loss'].numpy())
                         
                         # 重置軌跡緩衝區
                         self.reset_trajectory_buffer()
@@ -619,7 +837,7 @@ class MultiRobotA2CTrainer:
                 print(f"探索率: {self.epsilon:.3f}")
                 print(f"平均損失: {self.training_history['losses'][-1]:.6f}")
 
-                # 添加Actor和Fitic損失輸出
+                # 添加Actor和Critic損失輸出
                 if 'robot1_policy_loss' in self.training_history and len(self.training_history['robot1_policy_loss']) > 0:
                     avg_actor_loss = (self.training_history['robot1_policy_loss'][-1] + 
                                     self.training_history['robot2_policy_loss'][-1]) / 2

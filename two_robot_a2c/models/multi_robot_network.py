@@ -701,10 +701,12 @@ class MultiRobotA2CModel:
         return critic_model
 
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos, 
-                   robot1_target, robot2_target, 
-                   robot1_actions, robot2_actions, 
-                   robot1_advantages, robot2_advantages):
-        """改進的Actor訓練，增強梯度處理"""
+                robot1_target, robot2_target, 
+                robot1_actions, robot2_actions, 
+                robot1_advantages, robot2_advantages,
+                robot1_old_logits=None, robot2_old_logits=None,
+                training_history=None, episode=0):
+        """強化熵正則化的Actor訓練，促進探索但不使用ε-greedy"""
         with tf.GradientTape() as tape:
             # 獲取策略預測
             policy_dict = self.actor({
@@ -731,55 +733,178 @@ class MultiRobotA2CModel:
             
             # 計算策略損失
             policy_loss_coef = 1.0  # 策略損失係數
+            
+            # 基本的REINFORCE損失
             robot1_loss = -tf.reduce_mean(log_prob_1 * robot1_advantages) * policy_loss_coef
             robot2_loss = -tf.reduce_mean(log_prob_2 * robot2_advantages) * policy_loss_coef
             
-            # 熵正則化 - 使用較小的係數
-            entropy_coef = 0.001  # 減小熵係數
-            entropy_1 = -tf.reduce_mean(tf.reduce_sum(robot1_policy_smoothed * tf.math.log(robot1_policy_smoothed + 1e-10), axis=1))
-            entropy_2 = -tf.reduce_mean(tf.reduce_sum(robot2_policy_smoothed * tf.math.log(robot2_policy_smoothed + 1e-10), axis=1))
+            # 強化熵正則化 - 使用固定係數或從參數獲取
+            entropy_coef = self.get_entropy_coefficient(training_history, episode)
+            entropy_1 = -tf.reduce_mean(tf.reduce_sum(
+                robot1_policy_smoothed * tf.math.log(robot1_policy_smoothed + 1e-10), 
+                axis=1
+            ))
+            entropy_2 = -tf.reduce_mean(tf.reduce_sum(
+                robot2_policy_smoothed * tf.math.log(robot2_policy_smoothed + 1e-10), 
+                axis=1
+            ))
             
-            # 總損失 - 策略損失減去熵獎勵
-            total_loss = (robot1_loss + robot2_loss) - entropy_coef * (entropy_1 + entropy_2)
+            # 熵獎勵（熵越大，總損失越小，促進探索）
+            entropy_reward = entropy_coef * (entropy_1 + entropy_2)
+            
+            # PPO風格的比率限制
+            if robot1_old_logits is not None and robot2_old_logits is not None:
+                # 計算舊策略的對數概率
+                robot1_old_logits = tf.convert_to_tensor(robot1_old_logits, dtype=tf.float32)
+                robot2_old_logits = tf.convert_to_tensor(robot2_old_logits, dtype=tf.float32)
+                
+                robot1_old_policy = tf.nn.softmax(robot1_old_logits, axis=-1)
+                robot2_old_policy = tf.nn.softmax(robot2_old_logits, axis=-1)
+                
+                # 平滑處理舊策略
+                robot1_old_policy = (1 - epsilon) * robot1_old_policy + epsilon / self.max_frontiers
+                robot2_old_policy = (1 - epsilon) * robot2_old_policy + epsilon / self.max_frontiers
+                
+                # 計算舊策略下的動作概率
+                old_log_prob_1 = tf.math.log(tf.reduce_sum(robot1_old_policy * actions_one_hot_1, axis=1) + 1e-10)
+                old_log_prob_2 = tf.math.log(tf.reduce_sum(robot2_old_policy * actions_one_hot_2, axis=1) + 1e-10)
+                
+                # 計算概率比率
+                ratio_1 = tf.exp(log_prob_1 - old_log_prob_1)
+                ratio_2 = tf.exp(log_prob_2 - old_log_prob_2)
+                
+                # 裁剪比率
+                clip_range = 0.2  # PPO裁剪範圍
+                clipped_ratio_1 = tf.clip_by_value(ratio_1, 1 - clip_range, 1 + clip_range)
+                clipped_ratio_2 = tf.clip_by_value(ratio_2, 1 - clip_range, 1 + clip_range)
+                
+                # 計算裁剪後的策略損失
+                robot1_clipped_loss = -tf.reduce_mean(
+                    tf.minimum(
+                        ratio_1 * robot1_advantages,
+                        clipped_ratio_1 * robot1_advantages
+                    )
+                ) * policy_loss_coef
+                
+                robot2_clipped_loss = -tf.reduce_mean(
+                    tf.minimum(
+                        ratio_2 * robot2_advantages,
+                        clipped_ratio_2 * robot2_advantages
+                    )
+                ) * policy_loss_coef
+                
+                # 使用裁剪後的損失
+                robot1_loss = robot1_clipped_loss
+                robot2_loss = robot2_clipped_loss
+            
+            # 總損失 = 策略損失 - 熵獎勵
+            policy_loss = robot1_loss + robot2_loss
+            total_loss = policy_loss - entropy_reward
+            
+            # 增加額外的協調損失，鼓勵兩個機器人選擇不同的動作
+            # 計算兩個策略分布的相似度
+            similarity = tf.reduce_mean(
+                tf.reduce_sum(
+                    tf.sqrt(robot1_policy_smoothed * robot2_policy_smoothed), 
+                    axis=1
+                )
+            )
+            
+            # 協調係數
+            coordination_coef = 0.1
+            coordination_loss = coordination_coef * similarity
+            
+            # 將協調損失加入總損失
+            total_loss += coordination_loss
         
         # 計算梯度
         grads = tape.gradient(total_loss, self.actor.trainable_variables)
         
-        # 梯度處理 - 重要步驟
+        # 梯度處理
         # 1. 替換 NaN 梯度為零
         grads = [tf.where(tf.math.is_nan(g), tf.zeros_like(g), g) if g is not None else g for g in grads]
         
-        # 2. 處理梯度爆炸
-        clipped_grads = []
-        for g in grads:
-            if g is not None:
-                # 檢測異常大的梯度
-                norm = tf.norm(g)
-                
-                # 如果範數過大，進行裁剪
-                if norm > 1.0:
-                    g = g * (1.0 / norm)
-                    
-                # 如果梯度極小但非零，可能需要輕微放大
-                elif 0 < norm < 1e-4:
-                    scale_factor = 1e-4 / (norm + 1e-10)
-                    g = g * tf.minimum(scale_factor, 10.0)  # 限制最大放大倍數
-                    
-            clipped_grads.append(g)
-        
-        # 全局梯度裁剪
-        clipped_grads, _ = tf.clip_by_global_norm(clipped_grads, 1.0)
+        # 2. 梯度裁剪，避免梯度爆炸
+        clipped_grads, grad_norm = tf.clip_by_global_norm(grads, 1.0)
         
         # 應用梯度
         self.actor.optimizer.apply_gradients(zip(clipped_grads, self.actor.trainable_variables))
         
-        return {
+        # 返回指標
+        metrics = {
             'total_policy_loss': total_loss,
             'robot1_policy_loss': robot1_loss,
             'robot2_policy_loss': robot2_loss,
             'robot1_entropy': entropy_1,
-            'robot2_entropy': entropy_2
+            'robot2_entropy': entropy_2,
+            'entropy_coef': entropy_coef,
+            'coordination_loss': coordination_loss,
+            'gradient_norm': grad_norm
         }
+        
+        # 每隔一段時間打印一些訓練信息
+        if np.random.random() < 0.05:  # 5%的機率打印
+            print(f"\n訓練指標:")
+            print(f"Robot1熵: {entropy_1.numpy():.3f}, Robot2熵: {entropy_2.numpy():.3f}")
+            print(f"熵係數: {entropy_coef:.4f}")
+            print(f"協調損失: {coordination_loss.numpy():.4f}")
+            print(f"梯度範數: {grad_norm.numpy():.4f}")
+        
+        return metrics
+
+    def get_entropy_coefficient(self, training_history=None, episode=0):
+        """動態調整熵係數以平衡探索和利用
+        
+        Args:
+            training_history: 可選的訓練歷史字典
+            episode: 當前訓練回合數
+        """
+        # 預設的基本熵係數
+        base_coef = 0.01
+        
+        # 如果沒有提供訓練歷史或者回合數太少，使用較高的熵係數促進初期探索
+        if training_history is None or episode < 20:
+            return 0.05  # 初期使用較高值
+        
+        # 計算近期的熵值（如果有記錄）
+        if ('robot1_entropy' in training_history and 
+            len(training_history['robot1_entropy']) > 0):
+            
+            recent_entropy1 = np.mean(training_history['robot1_entropy'][-10:])
+            recent_entropy2 = np.mean(training_history['robot2_entropy'][-10:])
+            avg_entropy = (recent_entropy1 + recent_entropy2) / 2
+            
+            # 理論最大熵 (均勻分布的熵)
+            max_entropy = np.log(self.max_frontiers)
+            
+            # 計算熵占最大熵的比例
+            entropy_ratio = avg_entropy / max_entropy if max_entropy > 0 else 0
+            
+            # 根據熵比例動態調整係數
+            if entropy_ratio < 0.3:
+                # 熵太低，增加係數促進探索
+                coef = base_coef * 2.0
+            elif entropy_ratio > 0.7:
+                # 熵太高，減少係數增加利用
+                coef = base_coef * 0.5
+            else:
+                # 熵處於合理範圍
+                coef = base_coef
+                
+        else:
+            # 沒有熵歷史記錄，使用預設值
+            coef = base_coef
+        
+        # 週期性地增加熵係數，避免陷入局部最優
+        if episode % 100 == 0 and episode > 0:
+            # 每100輪增加一次熵係數
+            coef = coef * 1.5
+            print(f"週期性增加熵係數至 {coef:.4f} 以促進探索")
+        
+        # 限制係數的範圍
+        coef = np.clip(coef, 0.001, 0.1)
+        
+        return coef
     
     def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target, 
@@ -839,19 +964,24 @@ class MultiRobotA2CModel:
         }
     
     def train_batch(self, states, frontiers, robot1_pos, robot2_pos, 
-                   robot1_target, robot2_target,
-                   robot1_actions, robot2_actions, 
-                   robot1_advantages, robot2_advantages,
-                   robot1_returns, robot2_returns,
-                   robot1_old_values, robot2_old_values,
-                   robot1_old_logits, robot2_old_logits):
+                robot1_target, robot2_target,
+                robot1_actions, robot2_actions, 
+                robot1_advantages, robot2_advantages,
+                robot1_returns, robot2_returns,
+                robot1_old_values, robot2_old_values,
+                robot1_old_logits, robot2_old_logits,
+                training_history=None):  # Accept training_history as a parameter
         """改進的批次訓練過程"""
         # 訓練Actor
+        current_episode = len(training_history['episode_rewards']) if training_history else 0
+        
         actor_metrics = self.train_actor(
             states, frontiers, robot1_pos, robot2_pos, 
             robot1_target, robot2_target,
             robot1_actions, robot2_actions, 
-            robot1_advantages, robot2_advantages
+            robot1_advantages, robot2_advantages,
+            robot1_old_logits, robot2_old_logits,
+            training_history, current_episode  # Pass the training history
         )
         
         # 訓練Critic
@@ -898,7 +1028,7 @@ class MultiRobotA2CModel:
             'robot2_value_loss': critic_metrics['robot2_value_loss'],
             'robot1_entropy': robot1_entropy,
             'robot2_entropy': robot2_entropy,
-            'gradient_norm': 0.0  # 保持接口一致
+            'gradient_norm': actor_metrics.get('gradient_norm', 0.0)  # 保持接口一致
         }
     
     def predict(self, state, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target):
