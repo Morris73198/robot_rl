@@ -90,9 +90,9 @@ def main():
             )
             
             # Set epsilon related parameters
-            trainer.epsilon = 0.0           # Set current epsilon value (exploration rate)
+            trainer.epsilon = 1.0           # Set current epsilon value (exploration rate)
             trainer.epsilon_min = 0.075     # Set minimum epsilon value
-            trainer.epsilon_decay = 0.9985  # Set epsilon decay rate
+            trainer.epsilon_decay = 0.998  # Set epsilon decay rate
             
             # Ensure model save directory exists
             if not os.path.exists(MODEL_DIR):
