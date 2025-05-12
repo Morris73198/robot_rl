@@ -907,8 +907,8 @@ class EnhancedMultiRobotA2CTrainer:
                         self.reset_trajectory_buffer()
 
                 # 動態減少epsilon，鼓勵逐漸從探索轉向利用
-                if self.epsilon > self.epsilon_min:
-                    self.epsilon *= self.epsilon_decay
+                # if self.epsilon > self.epsilon_min:
+                #     self.epsilon *= self.epsilon_decay
                 
                 # Calculate overlap area (this code runs outside the training loop, after an episode ends)
                 overlap_ratio = self.map_tracker.calculate_overlap()
