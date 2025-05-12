@@ -433,9 +433,7 @@ class EnhancedMultiRobotA2CTrainer:
                 robot1_logits = np.zeros(self.model.max_frontiers)
                 robot2_logits = np.zeros(self.model.max_frontiers)
         
-        # 動態減少epsilon，鼓勵逐漸從探索轉向利用
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        
         
         return robot1_action, robot2_action, robot1_value, robot2_value, robot1_logits, robot2_logits
 
@@ -907,6 +905,10 @@ class EnhancedMultiRobotA2CTrainer:
                         
                         # Reset trajectory buffer
                         self.reset_trajectory_buffer()
+
+                # 動態減少epsilon，鼓勵逐漸從探索轉向利用
+                if self.epsilon > self.epsilon_min:
+                    self.epsilon *= self.epsilon_decay
                 
                 # Calculate overlap area (this code runs outside the training loop, after an episode ends)
                 overlap_ratio = self.map_tracker.calculate_overlap()
