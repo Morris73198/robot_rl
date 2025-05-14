@@ -85,9 +85,9 @@ def main():
             )
             
             # 設置 epsilon 相關參數
-            trainer.epsilon = 1.0           # 設置當前的 epsilon 值 (探索率)
-            trainer.epsilon_min = 0.075     # 設置最小 epsilon 值
-            trainer.epsilon_decay = 0.998  # 設置 epsilon 衰減率
+            trainer.epsilon = 0.4           # 設置當前的 epsilon 值 (探索率)
+            trainer.epsilon_min = 0.05     # 設置最小 epsilon 值
+            trainer.epsilon_decay = 0.995  # 設置 epsilon 衰減率
             
             # 確保模型保存目錄存在
             if not os.path.exists(MODEL_DIR):
