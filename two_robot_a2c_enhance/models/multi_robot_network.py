@@ -420,9 +420,9 @@ class MultiRobotACModel:
         
         # 使用不同大小的卷積核進行特征提取，但減少特徵數量
         conv_configs = [
-            {'filters': 16, 'kernel_size': 3, 'strides': 2},  # 從32減半到16
-            {'filters': 16, 'kernel_size': 5, 'strides': 2},
-            {'filters': 16, 'kernel_size': 7, 'strides': 2}
+            {'filters': 32, 'kernel_size': 3, 'strides': 2},  # 從32減半到16
+            {'filters': 32, 'kernel_size': 5, 'strides': 2},
+            {'filters': 32, 'kernel_size': 7, 'strides': 2}
         ]
         
         features = []
@@ -442,7 +442,7 @@ class MultiRobotACModel:
             
         # 合併特征
         x = layers.Add()(features)
-        x = layers.Conv2D(32, 1, padding='same')(x)  # 從64減半到32
+        x = layers.Conv2D(64, 1, padding='same')(x)  # 從64減半到32
         x = layers.BatchNormalization()(x)
         x = layers.Activation('relu')(x)
         x = layers.GlobalAveragePooling2D()(x)
@@ -452,7 +452,7 @@ class MultiRobotACModel:
     def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
         """構建記憶體優化版的共享特徵提取層"""
         # 減少中間層大小，從64降到32
-        reduced_dim = 32
+        reduced_dim = 64
         
         # 處理 frontier 特征，減少中間特徵維度
         frontier_features = layers.Dense(reduced_dim, activation='relu')(frontier_input)
@@ -498,7 +498,7 @@ class MultiRobotACModel:
         # 添加優化版的跨機器人注意力
         robot1_enhanced, robot2_enhanced = CrossRobotAttention(
             d_model=reduced_dim // 2, 
-            num_heads=1  # 減少頭數
+            num_heads=4  # 減少頭數
         )([robot1_feat, robot2_feat])
         
         # 融合機器人特徵
@@ -513,8 +513,8 @@ class MultiRobotACModel:
         # 添加優化版的時間注意力
         temporal_features = TemporalAttention(
             d_model=reduced_dim,
-            memory_length=5,  # 減少記憶長度
-            num_heads=1  # 減少頭數
+            memory_length=20,  # 減少記憶長度
+            num_heads=4  # 減少頭數
         )(temporal_frontier_feature)
         
         # 使用較小的特徵維度
@@ -549,9 +549,9 @@ class MultiRobotACModel:
         
     def _build_policy_head(self, features, name_prefix):
         """構建策略輸出頭"""
-        x = layers.Dense(64, activation='relu')(features)  # 從128減少到64
+        x = layers.Dense(128, activation='relu')(features)  # 從128減少到64
         x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(32, activation='relu')(x)  # 從64減少到32
+        x = layers.Dense(64, activation='relu')(x)  # 從64減少到32
         x = layers.Dropout(self.dropout_rate)(x)
         policy = layers.Dense(
             self.max_frontiers,
@@ -562,9 +562,9 @@ class MultiRobotACModel:
 
     def _build_value_head(self, features, name_prefix):
         """構建價值輸出頭"""
-        x = layers.Dense(64, activation='relu')(features)  # 從128減少到64
+        x = layers.Dense(128, activation='relu')(features)  # 從128減少到64
         x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(32, activation='relu')(x)  # 從64減少到32
+        x = layers.Dense(64, activation='relu')(x)  # 從64減少到32
         x = layers.Dropout(self.dropout_rate)(x)
         value = layers.Dense(1, name=name_prefix)(x)
         return value
@@ -580,11 +580,11 @@ class MultiRobotACModel:
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
         # 處理地圖輸入 - CNN網絡
-        x = layers.Conv2D(32, 3, strides=2, padding='same', activation='relu')(map_input)
-        x = layers.BatchNormalization()(x)
-        x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(map_input)
         x = layers.BatchNormalization()(x)
         x = layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(256, 3, strides=2, padding='same', activation='relu')(x)
         x = layers.BatchNormalization()(x)
         map_features = layers.Flatten()(x)
         map_features = layers.Dense(256, activation='relu')(map_features)
@@ -651,11 +651,11 @@ class MultiRobotACModel:
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
         # 處理地圖輸入 - CNN網絡
-        x = layers.Conv2D(32, 3, strides=2, padding='same', activation='relu')(map_input)
-        x = layers.BatchNormalization()(x)
-        x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(map_input)
         x = layers.BatchNormalization()(x)
         x = layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(256, 3, strides=2, padding='same', activation='relu')(x)
         x = layers.BatchNormalization()(x)
         map_features = layers.Flatten()(x)
         map_features = layers.Dense(256, activation='relu')(map_features)

@@ -21,7 +21,7 @@ TRAIN_CONFIG = {
     'episodes': 1000000,             # 訓練總回合數
     'steps_per_episode': 5000,       # 每回合最大步數
     'target_update_freq': 5,        # 目標網路更新頻率
-    'save_freq': 1,                 # 模型儲存頻率
+    'save_freq': 20,                 # 模型儲存頻率
 }
 
 # 機器人配置
