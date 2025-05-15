@@ -1,10 +1,11 @@
 import tensorflow as tf
 import numpy as np
-from tensorflow.keras import layers, models, regularizers, optimizers
+from tensorflow.keras import layers, models, regularizers
 import json
+import os
 
-# Helper layers
 class LayerNormalization(layers.Layer):
+    """自定義層正規化層"""
     def __init__(self, epsilon=1e-6, **kwargs):
         super().__init__(**kwargs)
         self.epsilon = epsilon
@@ -32,7 +33,75 @@ class LayerNormalization(layers.Layer):
         config.update({'epsilon': self.epsilon})
         return config
 
+class MultiHeadAttention(layers.Layer):
+    """多頭注意力層"""
+    def __init__(self, d_model, num_heads, dropout_rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        
+        assert d_model % num_heads == 0
+        self.depth = d_model // num_heads
+        
+        self.wq = layers.Dense(d_model)
+        self.wk = layers.Dense(d_model)
+        self.wv = layers.Dense(d_model)
+        self.dense = layers.Dense(d_model)
+        self.dropout = layers.Dropout(dropout_rate)
+        self.layer_norm = LayerNormalization()
+        
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'dropout_rate': self.dropout_rate
+        })
+        return config
+        
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+        
+    def call(self, inputs, mask=None, training=None):
+        q, k, v = inputs
+        batch_size = tf.shape(q)[0]
+        
+        q = self.wq(q)
+        k = self.wk(k)
+        v = self.wv(v)
+        
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        
+        scaled_attention = self.scaled_dot_product_attention(q, k, v, mask)
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+        concat_attention = tf.reshape(scaled_attention, 
+                                    (batch_size, -1, self.d_model))
+        
+        output = self.dense(concat_attention)
+        output = self.dropout(output, training=training)
+        output = self.layer_norm(output)
+        
+        return output
+        
+    def scaled_dot_product_attention(self, q, k, v, mask=None):
+        matmul_qk = tf.matmul(q, k, transpose_b=True)
+        dk = tf.cast(tf.shape(k)[-1], tf.float32)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+        
+        if mask is not None:
+            scaled_attention_logits += (mask * -1e9)
+            
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        attention_weights = self.dropout(attention_weights)
+        output = tf.matmul(attention_weights, v)
+        return output
+
 class SpatialAttention(layers.Layer):
+    """空間注意力層"""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -47,21 +116,235 @@ class SpatialAttention(layers.Layer):
         concat = tf.concat([avg_pool, max_pool], axis=-1)
         attention_map = self.conv1(concat)
         attention_map = tf.sigmoid(attention_map)
-        
         output = inputs * attention_map
         output = self.norm(output)
         return output
-        
+
     def get_config(self):
         return super().get_config()
 
+class EnhancedSpatialAttention(layers.Layer):
+    """記憶體優化版的增強空間注意力層"""
+    def __init__(self, reduction_ratio=16, **kwargs):
+        super().__init__(**kwargs)
+        self.reduction_ratio = reduction_ratio
+        
+    def build(self, input_shape):
+        self.channels = input_shape[-1]
+        
+        # 簡化的多尺度卷積
+        self.conv3x3 = layers.Conv2D(self.channels//self.reduction_ratio, 3, padding='same', use_bias=False)
+        
+        # 注意力映射
+        self.attention_conv = layers.Conv2D(1, 1, padding='same', use_bias=False)
+        self.norm = LayerNormalization()
+        
+        super().build(input_shape)
+        
+    def call(self, inputs):
+        # 空間注意力 - 簡化處理
+        avg_pool = tf.reduce_mean(inputs, axis=-1, keepdims=True)
+        max_pool = tf.reduce_max(inputs, axis=-1, keepdims=True)
+        
+        # 多尺度特徵提取 - 只使用一個卷積核大小
+        feat_3x3 = self.conv3x3(inputs)
+        
+        # 融合特徵 - 簡化連接
+        multi_scale = tf.concat([
+            tf.reduce_mean(feat_3x3, axis=-1, keepdims=True),
+            avg_pool,
+            max_pool
+        ], axis=-1)
+        
+        # 生成空間注意力圖
+        spatial_attn = self.attention_conv(multi_scale)
+        spatial_attn = tf.sigmoid(spatial_attn)
+        
+        # 應用空間注意力
+        refined = inputs * spatial_attn
+        output = self.norm(refined)
+        
+        return output
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'reduction_ratio': self.reduction_ratio})
+        return config
+
+class CrossRobotAttention(layers.Layer):
+    """記憶體優化版的機器人間交互注意力層"""
+    def __init__(self, d_model, num_heads=2, dropout_rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        
+    def build(self, input_shape):
+        # 使用更輕量級的注意力機制
+        self.attention = layers.Attention(use_scale=True, dropout=self.dropout_rate)
+        self.layernorm1 = LayerNormalization()
+        self.layernorm2 = LayerNormalization()
+        super().build(input_shape)
+        
+    def call(self, inputs):
+        # 提取兩個機器人的特徵
+        robot1_features, robot2_features = inputs
+        
+        # 擴展輸入維度以適應注意力機制
+        robot1_expanded = tf.expand_dims(robot1_features, axis=1)
+        robot2_expanded = tf.expand_dims(robot2_features, axis=1)
+        
+        # 機器人1注意機器人2（使用一般注意力代替多頭注意力）
+        r1_attends_r2 = self.attention([robot1_expanded, robot2_expanded, robot2_expanded])
+        r1_enhanced = self.layernorm1(robot1_expanded + r1_attends_r2)
+        
+        # 機器人2注意機器人1
+        r2_attends_r1 = self.attention([robot2_expanded, robot1_expanded, robot1_expanded])
+        r2_enhanced = self.layernorm2(robot2_expanded + r2_attends_r1)
+        
+        # 移除多餘的維度
+        return tf.squeeze(r1_enhanced, axis=1), tf.squeeze(r2_enhanced, axis=1)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'dropout_rate': self.dropout_rate
+        })
+        return config
+
+class TemporalAttention(layers.Layer):
+    """記憶體優化版的時間注意力層"""
+    def __init__(self, d_model, memory_length=5, num_heads=2, dropout_rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        # 減少記憶長度以節省記憶體
+        self.memory_length = memory_length
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        
+    def build(self, input_shape):
+        # 將記憶體初始化為可訓練的權重而非不可訓練的變數
+        self.memory = self.add_weight(
+            name="temporal_memory",
+            shape=[1, self.memory_length, self.d_model],
+            initializer=tf.initializers.zeros(),
+            trainable=True  # 使記憶可訓練，可以更好地融入模型
+        )
+        
+        # 使用單一頭注意力以減少記憶體需求
+        self.attention = layers.Attention(use_scale=True, dropout=self.dropout_rate)
+        self.layernorm = LayerNormalization()
+        super().build(input_shape)
+        
+    def call(self, inputs, training=None):
+        # 確保輸入是 2D [batch_size, d_model]
+        if len(inputs.shape) > 2:
+            inputs = tf.reduce_mean(inputs, axis=list(range(1, len(tf.shape(inputs))-1)))
+        
+        # 擴展輸入維度以適應注意力機制 [batch_size, 1, d_model]
+        query = tf.expand_dims(inputs, axis=1)
+        batch_size = tf.shape(query)[0]
+        
+        # 將記憶複製到批次維度
+        key_value = tf.repeat(self.memory, batch_size, axis=0)
+        
+        # 使用內建注意力層代替自定義多頭注意力
+        attended = self.attention([query, key_value, key_value])
+        output = self.layernorm(query + attended)
+        
+        # 在訓練時更新記憶
+        if training:
+            # 使用移動平均更新記憶
+            new_memory = tf.concat([self.memory[:, 1:, :], query[:1]], axis=1)
+            self.memory.assign(0.9 * self.memory + 0.1 * new_memory)  # 緩慢更新
+        
+        # 移除多餘的維度
+        return tf.squeeze(output, axis=1)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'memory_length': self.memory_length,
+            'num_heads': self.num_heads,
+            'dropout_rate': self.dropout_rate
+        })
+        return config
+
+class AdaptiveAttentionFusion(layers.Layer):
+    """記憶體優化版的自適應注意力融合層"""
+    def __init__(self, d_model, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        
+    def build(self, input_shape):
+        # 簡化結構，只使用一個全連接層作為權重生成
+        self.weight_net = layers.Dense(3, activation='softmax')
+        self.layernorm = LayerNormalization()
+        super().build(input_shape)
+        
+    def call(self, inputs):
+        # 假設輸入是[原始特徵, 空間注意力特徵, 交叉機器人特徵, 時間特徵]
+        original, spatial_attn, cross_robot_attn, temporal_attn = inputs
+        
+        # 確保所有輸入特徵都是 2D [batch_size, features]
+        spatial_attn_flat = tf.reduce_mean(spatial_attn, axis=list(range(1, len(tf.shape(spatial_attn))-1))) if len(spatial_attn.shape) > 2 else spatial_attn
+        cross_robot_attn_flat = tf.reduce_mean(cross_robot_attn, axis=list(range(1, len(tf.shape(cross_robot_attn))-1))) if len(cross_robot_attn.shape) > 2 else cross_robot_attn
+        temporal_attn_flat = tf.reduce_mean(temporal_attn, axis=list(range(1, len(tf.shape(temporal_attn))-1))) if len(temporal_attn.shape) > 2 else temporal_attn
+        
+        # 生成簡化版的融合權重
+        features_concat = tf.concat([
+            spatial_attn_flat,
+            cross_robot_attn_flat,
+            temporal_attn_flat
+        ], axis=-1)
+        
+        weights = self.weight_net(features_concat)
+        
+        # 直接在特徵空間應用權重，避免高維乘法運算
+        w1, w2, w3 = weights[:, 0:1], weights[:, 1:2], weights[:, 2:3]
+        
+        # 使用加權和代替直接乘法，減少記憶體需求
+        weighted_spatial = spatial_attn_flat * w1
+        weighted_cross = cross_robot_attn_flat * w2
+        weighted_temporal = temporal_attn_flat * w3
+        
+        # 簡單加和並正規化
+        fused = weighted_spatial + weighted_cross + weighted_temporal
+        output = self.layernorm(original + fused)
+        
+        return output
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({'d_model': self.d_model})
+        return config
+
 class PositionalEncoding(layers.Layer):
+    """位置編碼層 - 簡化版"""
     def __init__(self, max_position, d_model, **kwargs):
         super().__init__(**kwargs)
         self.max_position = max_position
         self.d_model = d_model
-        self.pos_encoding = self.positional_encoding(max_position, d_model)
         
+    def build(self, input_shape):
+        # 使用簡化的線性位置編碼代替複雜的正弦/餘弦編碼
+        position_enc = np.zeros((self.max_position, self.d_model))
+        for pos in range(self.max_position):
+            for i in range(self.d_model):
+                position_enc[pos, i] = pos / np.power(10000, 2 * (i // 2) / self.d_model)
+                
+        # 轉換為張量並添加批次維度
+        self.pos_encoding = tf.convert_to_tensor(position_enc, dtype=tf.float32)
+        self.pos_encoding = tf.expand_dims(self.pos_encoding, axis=0)
+        super().build(input_shape)
+        
+    def call(self, inputs):
+        seq_len = tf.shape(inputs)[1]
+        return inputs + self.pos_encoding[:, :seq_len, :]
+    
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -69,538 +352,226 @@ class PositionalEncoding(layers.Layer):
             'd_model': self.d_model
         })
         return config
-        
-    def positional_encoding(self, position, d_model):
-        angle_rads = self.get_angles(
-            np.arange(position)[:, np.newaxis],
-            np.arange(d_model)[np.newaxis, :],
-            d_model
-        )
-        
-        angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
-        angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-        
-        pos_encoding = angle_rads[np.newaxis, ...]
-        return tf.cast(pos_encoding, dtype=tf.float32)
-        
-    def get_angles(self, pos, i, d_model):
-        angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
-        return pos * angle_rates
-        
-    def call(self, inputs):
-        seq_len = tf.shape(inputs)[1]
-        return inputs + self.pos_encoding[:, :seq_len, :]
 
-class AdaptiveAttentionFusion(layers.Layer):
-    """
-    Implementation of the Adaptive Attention Fusion module as shown in image 1
-    Fixed to handle dimension mismatches
-    """
-    def __init__(self, d_model=256, **kwargs):
+class FeedForward(layers.Layer):
+    """前饋神經網路層 - 簡化版"""
+    def __init__(self, d_model, dff, dropout_rate=0.1, **kwargs):
         super().__init__(**kwargs)
         self.d_model = d_model
+        self.dff = dff
+        self.dropout_rate = dropout_rate
         
-    def build(self, input_shape):
-        # Get feature dimensions from input shapes
-        frontier_dim = input_shape[0][-1]
-        cross_robot_dim = input_shape[1][-1]
-        temporal_dim = input_shape[2][-1]
-        map_dim = input_shape[3][-1]
-        
-        # Feature projection layers to ensure uniform dimensions
-        # Project all features to d_model dimensions
-        self.frontier_projection = layers.Dense(self.d_model)
-        self.cross_robot_projection = layers.Dense(self.d_model)
-        self.temporal_projection = layers.Dense(self.d_model)
-        self.map_projection = layers.Dense(self.d_model)
-        
-        # Weight network for adaptive fusion
-        self.weight_dense = layers.Dense(3, activation='softmax')
+        self.dense1 = layers.Dense(dff, activation='relu')
+        self.dense2 = layers.Dense(d_model)
+        self.dropout = layers.Dropout(dropout_rate)
         self.layer_norm = LayerNormalization()
         
-        super().build(input_shape)
-        
-    def call(self, inputs):
-        # Inputs: [frontier_features, cross_robot_features, temporal_features, map_features]
-        frontier_features, cross_robot_features, temporal_features, map_features = inputs
-        
-        # Project all features to the same dimension
-        frontier_features_proj = self.frontier_projection(frontier_features)
-        cross_robot_features_proj = self.cross_robot_projection(cross_robot_features)
-        temporal_features_proj = self.temporal_projection(temporal_features)
-        map_features_proj = self.map_projection(map_features)
-        
-        # Concatenate for weight calculation
-        concat_features = tf.concat([frontier_features_proj, cross_robot_features_proj, temporal_features_proj], axis=-1)
-        
-        # Calculate adaptive weights
-        weights = self.weight_dense(concat_features)  # [w1, w2, w3]
-        
-        # Extract individual weights
-        w1 = tf.expand_dims(weights[:, 0], axis=-1)
-        w2 = tf.expand_dims(weights[:, 1], axis=-1)
-        w3 = tf.expand_dims(weights[:, 2], axis=-1)
-        
-        # Weighted features - all features now have same dimensions
-        weighted_features = w1 * frontier_features_proj + w2 * cross_robot_features_proj + w3 * temporal_features_proj
-        
-        # Residual connection with map features
-        output = weighted_features + map_features_proj
-        
-        # Normalization
-        output = self.layer_norm(output)
-        
-        return output
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'd_model': self.d_model
-        })
-        return config
-
-class TemporalAttentionModule(layers.Layer):
-    """
-    Implementation of the Temporal Attention module as shown in image 2
-    """
-    def __init__(self, d_model=256, memory_length=5, **kwargs):
-        super().__init__(**kwargs)
-        self.d_model = d_model
-        self.memory_length = memory_length
-        
-    def build(self, input_shape):
-        # Memory tensor - will be built during the first call
-        self.memory = None
-        
-        # Attention mechanism
-        self.query_dense = layers.Dense(self.d_model)
-        self.key_dense = layers.Dense(self.d_model)
-        self.value_dense = layers.Dense(self.d_model)
-        self.attention_dense = layers.Dense(self.d_model)
-        
-        super().build(input_shape)
-        
-    def call(self, inputs, training=False):
-        # Expand dimension if needed
-        expanded_input = tf.expand_dims(inputs, axis=1) if len(tf.shape(inputs)) == 2 else inputs
-        
-        batch_size = tf.shape(expanded_input)[0]
-        
-        # Initialize memory if it's None or batch size changed
-        if self.memory is None or tf.shape(self.memory)[0] != batch_size:
-            self.memory = tf.zeros((batch_size, self.memory_length, self.d_model))
-        
-        if training:
-            # Memory update (90% old + 10% new)
-            # Keep the most recent memory entries and add the new one
-            self.memory = tf.concat([self.memory[:, 1:], expanded_input], axis=1)
-        
-        # Attention mechanism
-        q = self.query_dense(expanded_input)  # Query from current input
-        k = self.key_dense(self.memory)       # Keys from memory
-        v = self.value_dense(self.memory)     # Values from memory
-        
-        # Scaled dot-product attention
-        matmul_qk = tf.matmul(q, k, transpose_b=True)
-        dk = tf.cast(tf.shape(k)[-1], tf.float32)
-        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-        
-        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
-        output = tf.matmul(attention_weights, v)
-        
-        # Final projection
-        output = self.attention_dense(output)
-        
-        # Remove the extra dimension if input was 2D
-        if len(tf.shape(inputs)) == 2:
-            output = tf.squeeze(output, axis=1)
-        
-        return output
+    def call(self, x, training=None):
+        ffn_output = self.dense1(x)
+        ffn_output = self.dropout(ffn_output, training=training)
+        ffn_output = self.dense2(ffn_output)
+        ffn_output = self.dropout(ffn_output, training=training)
+        ffn_output = self.layer_norm(x + ffn_output)
+        return ffn_output
     
     def get_config(self):
         config = super().get_config()
         config.update({
             'd_model': self.d_model,
-            'memory_length': self.memory_length
+            'dff': self.dff,
+            'dropout_rate': self.dropout_rate
         })
         return config
 
-class PerceptionModule(layers.Layer):
-    """
-    Implementation of the Perception module as shown in image 3
-    """
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        
-    def build(self, input_shape):
-        # CNN blocks with different kernel sizes
-        self.cnn_block3 = self._build_cnn_block(kernel_size=3, filters=32)
-        self.cnn_block5 = self._build_cnn_block(kernel_size=5, filters=32)
-        self.cnn_block7 = self._build_cnn_block(kernel_size=7, filters=32)
-        
-        # Spatial attention blocks
-        self.spatial_attention3 = SpatialAttention()
-        self.spatial_attention5 = SpatialAttention()
-        self.spatial_attention7 = SpatialAttention()
-        
-        # Feature fusion
-        self.fusion_conv = layers.Conv2D(32, 1, padding='same')
-        
-        # Max pooling
-        self.max_pool = layers.MaxPooling2D(pool_size=(2, 2))
-        
-        super().build(input_shape)
-        
-    def _build_cnn_block(self, kernel_size, filters):
-        return layers.Conv2D(
-            filters=filters,
-            kernel_size=kernel_size,
-            strides=1,
-            padding='same',
-            activation='relu',
-            kernel_initializer=tf.keras.initializers.HeNormal()
-        )
-        
-    def call(self, inputs):
-        # CNN blocks with different kernel sizes
-        x3 = self.cnn_block3(inputs)
-        x5 = self.cnn_block5(inputs)
-        x7 = self.cnn_block7(inputs)
-        
-        # Spatial attention
-        x3_att = self.spatial_attention3(x3)
-        x5_att = self.spatial_attention5(x5)
-        x7_att = self.spatial_attention7(x7)
-        
-        # Feature fusion (concatenate and 1x1 conv)
-        concat = tf.concat([x3_att, x5_att, x7_att], axis=-1)
-        fused = self.fusion_conv(concat)
-        
-        # Max pooling
-        pooled = self.max_pool(fused)
-        
-        return pooled
-    
-    def get_config(self):
-        return super().get_config()
-
-class CrossRobotAttention(layers.Layer):
-    """
-    Implementation of the Cross-Robot Attention module as shown in image 3
-    """
-    def __init__(self, d_model=256, **kwargs):
-        super().__init__(**kwargs)
-        self.d_model = d_model
-        
-    def build(self, input_shape):
-        # R1 attending to R2
-        self.r1_to_r2_dense = layers.Dense(self.d_model)
-        self.r1_norm = LayerNormalization()
-        
-        # R2 attending to R1
-        self.r2_to_r1_dense = layers.Dense(self.d_model)
-        self.r2_norm = LayerNormalization()
-        
-        # Output projection
-        self.output_dense = layers.Dense(self.d_model)
-        
-        super().build(input_shape)
-        
-    def call(self, inputs):
-        # Robot 1 and Robot 2 features
-        r1_features, r2_features = inputs
-        
-        # R1 attending to R2
-        r1_attends_r2 = self.r1_to_r2_dense(r2_features)
-        r1_attends_r2 = self.r1_norm(r1_attends_r2)
-        
-        # R2 attending to R1
-        r2_attends_r1 = self.r2_to_r1_dense(r1_features)
-        r2_attends_r1 = self.r2_norm(r2_attends_r1)
-        
-        # Concatenate attended features
-        cross_features = tf.concat([r1_attends_r2, r2_attends_r1], axis=-1)
-        
-        # Final projection
-        output = self.output_dense(cross_features)
-        
-        return output
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'd_model': self.d_model
-        })
-        return config
-
-class FrontierAttentionLayer(layers.Layer):
-    """
-    Implementation of the Frontier Attention Layer as shown in image 3
-    """
-    def __init__(self, d_model=64, max_frontiers=50, **kwargs):
-        super().__init__(**kwargs)
-        self.d_model = d_model
-        self.max_frontiers = max_frontiers
-        
-    def build(self, input_shape):
-        # Initial dense layer
-        self.dense64 = layers.Dense(self.d_model, activation='relu')
-        
-        # Position encoding
-        self.pos_encoding = PositionalEncoding(self.max_frontiers, self.d_model)
-        
-        # Self-attention components
-        self.query_dense = layers.Dense(self.d_model)
-        self.key_dense = layers.Dense(self.d_model)
-        self.value_dense = layers.Dense(self.d_model)
-        self.attention_dense = layers.Dense(self.d_model)
-        
-        # Feed forward network
-        self.ff_dense1 = layers.Dense(self.d_model * 4, activation='relu')
-        self.ff_dense2 = layers.Dense(self.d_model)
-        self.layer_norm = LayerNormalization()
-        
-        super().build(input_shape)
-        
-    def call(self, inputs):
-        # Initial processing
-        x = self.dense64(inputs)
-        
-        # Add positional encoding
-        x = self.pos_encoding(x)
-        
-        # Self-attention
-        q = self.query_dense(x)
-        k = self.key_dense(x)
-        v = self.value_dense(x)
-        
-        # Scaled dot-product attention
-        matmul_qk = tf.matmul(q, k, transpose_b=True)
-        dk = tf.cast(tf.shape(k)[-1], tf.float32)
-        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-        
-        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
-        attention_output = tf.matmul(attention_weights, v)
-        
-        # Projection
-        attention_output = self.attention_dense(attention_output)
-        
-        # Residual connection and normalization
-        x = x + attention_output
-        x = self.layer_norm(x)
-        
-        # Feed forward network
-        ff_output = self.ff_dense1(x)
-        ff_output = self.ff_dense2(ff_output)
-        
-        # Final residual connection and normalization
-        output = x + ff_output
-        output = self.layer_norm(output)
-        
-        return output
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'd_model': self.d_model,
-            'max_frontiers': self.max_frontiers
-        })
-        return config
-
-class EnhancedMultiRobotA2CModel:
+class MultiRobotACModel:
+    """多機器人 Actor-Critic 模型 - 記憶體優化版"""
     def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
-        """Initialize the multi-robot A2C model with the architecture from the images
-        
-        Args:
-            input_shape: Input map shape, default (84, 84, 1)
-            max_frontiers: Maximum number of frontier points, default 50
-        """
         self.input_shape = input_shape
         self.max_frontiers = max_frontiers
-        self.d_model = 256  # Model dimension
-        self.num_heads = 8  # Attention heads
-        self.dff = 512  # Feed forward network dimension
-        self.dropout_rate = 0.1  # Dropout rate
-        self.entropy_beta = 0.01  # Entropy regularization coefficient
-        self.value_loss_weight = 0.5  # Value loss weight
+        self.d_model = 256  # 模型維度
+        self.num_heads = 8  # 注意力頭數
+        self.dff = 512  # 前饋網絡維度
+        self.dropout_rate = 0.1
         
-        # Build separate actor and critic models
+        # 創建 Actor 和 Critic 網絡
         self.actor = self._build_actor()
         self.critic = self._build_critic()
+        
+        # 打印模型參數統計
+        self._print_model_summary()
     
-    def _build_perception_module(self, map_input):
-        """Build the perception module as shown in image 3"""
-        # CNN blocks with different kernel sizes
-        conv3 = layers.Conv2D(32, 3, padding='same', activation='relu')(map_input)
-        conv5 = layers.Conv2D(32, 5, padding='same', activation='relu')(map_input)
-        conv7 = layers.Conv2D(32, 7, padding='same', activation='relu')(map_input)
+    def _print_model_summary(self):
+        """打印模型參數統計"""
+        actor_params = self.actor.count_params()
+        critic_params = self.critic.count_params()
+        total_params = actor_params + critic_params
         
-        # Spatial attention
-        # Simple implementation using average and max pooling
-        def spatial_attention(x):
-            avg_pool = tf.reduce_mean(x, axis=-1, keepdims=True)
-            max_pool = tf.reduce_max(x, axis=-1, keepdims=True)
-            concat = tf.concat([avg_pool, max_pool], axis=-1)
-            attention = layers.Conv2D(1, 7, padding='same', activation='sigmoid')(concat)
-            return x * attention
+        print("\n===== 模型參數統計 =====")
+        print(f"Actor 參數: {actor_params:,}")
+        print(f"Critic 參數: {critic_params:,}")
+        print(f"總參數數量: {total_params:,}")
+        print(f"預期權重檔案大小: {total_params * 4 / (1024*1024):.2f} MB")
+        print("========================\n")
         
-        conv3_att = spatial_attention(conv3)
-        conv5_att = spatial_attention(conv5)
-        conv7_att = spatial_attention(conv7)
+    def _build_perception_module(self, inputs):
+        """構建共享的感知模塊 - 記憶體優化版"""
+        # 降低輸入分辨率
+        x = layers.AveragePooling2D(pool_size=(2, 2))(inputs)
         
-        # Feature fusion
-        concat = tf.concat([conv3_att, conv5_att, conv7_att], axis=-1)
-        fusion = layers.Conv2D(32, 1, padding='same', activation='relu')(concat)
+        # 使用不同大小的卷積核進行特征提取，但減少特徵數量
+        conv_configs = [
+            {'filters': 16, 'kernel_size': 3, 'strides': 2},  # 從32減半到16
+            {'filters': 16, 'kernel_size': 5, 'strides': 2},
+            {'filters': 16, 'kernel_size': 7, 'strides': 2}
+        ]
         
-        # Max pooling
-        pooled = layers.MaxPooling2D(pool_size=(2, 2))(fusion)
+        features = []
+        for config in conv_configs:
+            branch = layers.Conv2D(
+                filters=config['filters'],
+                kernel_size=config['kernel_size'],
+                strides=config['strides'],
+                padding='same',
+                kernel_regularizer=regularizers.l2(0.01)
+            )(x)
+            branch = layers.BatchNormalization()(branch)
+            branch = layers.Activation('relu')(branch)
+            # 使用優化版的空間注意力
+            branch = EnhancedSpatialAttention()(branch)
+            features.append(branch)
+            
+        # 合併特征
+        x = layers.Add()(features)
+        x = layers.Conv2D(32, 1, padding='same')(x)  # 從64減半到32
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.GlobalAveragePooling2D()(x)
         
-        return pooled
-    
-    def _build_state_processing(self, robot1_pos, robot1_target, robot2_pos, robot2_target):
-        """Build the state processing module as shown in image 3"""
-        # Robot 1 state
-        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
-        robot1_features = layers.Dense(16, activation='relu')(robot1_state)
+        return x
         
-        # Robot 2 state
-        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
-        robot2_features = layers.Dense(16, activation='relu')(robot2_state)
+    def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
+        """構建記憶體優化版的共享特徵提取層"""
+        # 減少中間層大小，從64降到32
+        reduced_dim = 32
         
-        # Cross-robot attention - simplified implementation
-        # Robot 1 attends to Robot 2
-        r1_to_r2 = layers.Dense(self.d_model, activation='relu')(robot2_features)
-        r1_to_r2 = layers.LayerNormalization()(r1_to_r2)
+        # 處理 frontier 特征，減少中間特徵維度
+        frontier_features = layers.Dense(reduced_dim, activation='relu')(frontier_input)
+        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
         
-        # Robot 2 attends to Robot 1
-        r2_to_r1 = layers.Dense(self.d_model, activation='relu')(robot1_features)
-        r2_to_r1 = layers.LayerNormalization()(r2_to_r1)
+        # 使用更簡單的位置編碼
+        # 添加簡化的位置編碼（線性位置編碼代替複雜的正弦/餘弦編碼）
+        pos_indices = tf.range(start=0, limit=tf.shape(frontier_features)[1], delta=1)
+        pos_indices = tf.cast(pos_indices, tf.float32)
+        pos_indices = tf.expand_dims(pos_indices, axis=-1)
+        pos_indices = tf.tile(pos_indices, [1, reduced_dim])
+        pos_indices = pos_indices / tf.cast(self.max_frontiers, tf.float32)
         
-        # Combine cross-robot features
-        cross_robot_features = layers.Concatenate()([r1_to_r2, r2_to_r1])
-        cross_robot_features = layers.Dense(self.d_model)(cross_robot_features)
+        # 擴展位置編碼到批次維度
+        batch_size = tf.shape(frontier_features)[0]
+        pos_encoding = tf.expand_dims(pos_indices, axis=0)
+        pos_encoding = tf.tile(pos_encoding, [batch_size, 1, 1])
         
-        return robot1_features, robot2_features, cross_robot_features
-    
-    def _build_frontier_attention(self, frontier_input):
-        """Build the frontier attention layer as shown in image 3"""
-        # Initial dense layer
-        x = layers.Dense(64, activation='relu')(frontier_input)
+        # 添加位置編碼到特徵 (加法代替複雜的位置編碼層)
+        frontier_features_with_pos = frontier_features + 0.1 * pos_encoding
         
-        # Add positional encoding - simplified
-        # We'll use a learned positional embedding
-        pos_embedding = layers.Dense(64)(frontier_input)
-        x = x + pos_embedding
+        # 使用標準的Self-Attention而非自定義的多頭注意力
+        # 先將特徵尺寸調整為注意力機制要求的形狀
+        attention_output = layers.MultiHeadAttention(
+            num_heads=2,  # 減少頭數
+            key_dim=reduced_dim // 2,  # 減少每個頭的維度
+            dropout=self.dropout_rate
+        )(frontier_features_with_pos, frontier_features_with_pos)
         
-        # Self-attention mechanism - simplified
-        query = layers.Dense(64)(x)
-        key = layers.Dense(64)(x)
-        value = layers.Dense(64)(x)
+        # 添加殘差連接和層正規化
+        frontier_features = layers.LayerNormalization()(frontier_features_with_pos + attention_output)
         
-        # Compute attention scores
-        scores = tf.matmul(query, key, transpose_b=True)
-        scores = scores / tf.math.sqrt(tf.cast(64, tf.float32))
-        attention_weights = tf.nn.softmax(scores, axis=-1)
+        # 使用一個簡單的前饋網路代替FeedForward類
+        frontier_features = layers.Dense(reduced_dim * 2, activation='relu')(frontier_features)
+        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
+        frontier_features = layers.Dense(reduced_dim)(frontier_features)
+        frontier_features = layers.LayerNormalization()(frontier_features_with_pos + frontier_features)
         
-        # Apply attention
-        attention_output = tf.matmul(attention_weights, value)
+        # 處理機器人狀態，減少特徵維度
+        robot1_feat = layers.Dense(reduced_dim // 2, activation='relu')(robot1_state)
+        robot2_feat = layers.Dense(reduced_dim // 2, activation='relu')(robot2_state)
         
-        # Feed forward network
-        ff_output = layers.Dense(256, activation='relu')(attention_output)
-        ff_output = layers.Dense(64)(ff_output)
+        # 添加優化版的跨機器人注意力
+        robot1_enhanced, robot2_enhanced = CrossRobotAttention(
+            d_model=reduced_dim // 2, 
+            num_heads=1  # 減少頭數
+        )([robot1_feat, robot2_feat])
         
-        # Final output with layer normalization
-        output = layers.Add()([attention_output, ff_output])
-        output = layers.LayerNormalization()(output)
+        # 融合機器人特徵
+        robot_features = layers.Concatenate()([robot1_enhanced, robot2_enhanced])
         
-        return output
-    
-    def _build_temporal_attention(self, features):
-        """Build a simplified temporal attention module as shown in image 2"""
-        # Since we can't maintain memory between calls easily in this implementation,
-        # we'll use a simplified version that doesn't rely on persistent memory
+        # 處理時間維度特徵，全局平均池化減少參數量
+        temporal_frontier_feature = layers.GlobalAveragePooling1D()(frontier_features)
         
-        # Project features
-        x = layers.Reshape((1, -1))(features)  # Add sequence dimension
+        # 使用較小的特徵維度
+        temporal_frontier_feature = layers.Dense(reduced_dim, activation='relu')(temporal_frontier_feature)
         
-        # Self-attention on this single timestep
-        query = layers.Dense(self.d_model)(x)
-        key = layers.Dense(self.d_model)(x)
-        value = layers.Dense(self.d_model)(x)
+        # 添加優化版的時間注意力
+        temporal_features = TemporalAttention(
+            d_model=reduced_dim,
+            memory_length=5,  # 減少記憶長度
+            num_heads=1  # 減少頭數
+        )(temporal_frontier_feature)
         
-        # Attention mechanism
-        attention_output = layers.Attention()([query, value, key])
+        # 使用較小的特徵維度
+        map_features_reduced = layers.Dense(reduced_dim, activation='relu')(map_features)
+        frontier_global = layers.GlobalAveragePooling1D()(frontier_features)
+        frontier_global = layers.Dense(reduced_dim, activation='relu')(frontier_global)
+        robot_features_reduced = layers.Dense(reduced_dim, activation='relu')(robot_features)
         
-        # Final projection
-        output = layers.Dense(self.d_model)(attention_output)
-        output = layers.Reshape((-1,))(output)  # Remove sequence dimension
+        # 使用優化版的自適應注意力融合
+        fused_features = AdaptiveAttentionFusion(
+            d_model=reduced_dim
+        )([
+            map_features_reduced,
+            frontier_global,
+            robot_features_reduced,
+            temporal_features
+        ])
         
-        return output
-    
-    def _build_adaptive_fusion(self, frontier_features, cross_robot_features, 
-                              temporal_features, map_features):
-        """Build a fixed version of the adaptive attention fusion module"""
-        # Project all features to the same dimension
-        frontier_proj = layers.Dense(self.d_model)(frontier_features)
-        cross_robot_proj = layers.Dense(self.d_model)(cross_robot_features)
-        temporal_proj = layers.Dense(self.d_model)(temporal_features)
-        map_proj = layers.Dense(self.d_model)(map_features)
+        # 使用較小的隱藏層尺寸
+        combined_features = layers.Concatenate()([
+            map_features_reduced,
+            fused_features,
+            robot_features_reduced
+        ])
         
-        # Concatenate for weight calculation
-        concat = layers.Concatenate()([frontier_proj, cross_robot_proj, temporal_proj])
-        
-        # Calculate weights
-        weights = layers.Dense(3, activation='softmax')(concat)
-        
-        # Extract weights
-        w1 = tf.expand_dims(weights[:, 0], axis=-1)
-        w2 = tf.expand_dims(weights[:, 1], axis=-1)
-        w3 = tf.expand_dims(weights[:, 2], axis=-1)
-        
-        # Apply weights
-        weighted_sum = (
-            w1 * frontier_proj + 
-            w2 * cross_robot_proj + 
-            w3 * temporal_proj
-        )
-        
-        # Residual connection
-        output = layers.Add()([weighted_sum, map_proj])
-        output = layers.LayerNormalization()(output)
-        
-        return output
-    
-    def _build_actor_network(self, fusion_features, name_prefix):
-        """Build the actor network for each robot"""
-        x = layers.Dense(128, activation='relu')(fusion_features)
-        x = layers.Dropout(0.1)(x)
+        # 最終特徵處理，減少隱藏層大小
+        x = layers.Dense(128, activation='relu')(combined_features)
+        x = layers.Dropout(self.dropout_rate)(x)
         x = layers.Dense(64, activation='relu')(x)
-        x = layers.Dropout(0.1)(x)
         
-        # Policy output
-        logits = layers.Dense(self.max_frontiers, name=f"{name_prefix}_policy_logits")(x)
-        policy = layers.Lambda(
-            lambda x: tf.nn.softmax(x),
-            name=f"{name_prefix}_policy"
-        )(logits)
+        return x
         
-        return policy, logits
-    
-    def _build_critic_network(self, fusion_features, name_prefix):
-        """Build the critic network for each robot"""
-        x = layers.Dense(64, activation='relu')(fusion_features)
-        x = layers.Dropout(0.1)(x)
-        x = layers.Dense(32, activation='relu')(x)
-        x = layers.Dropout(0.1)(x)
-        
-        # Value output
-        value = layers.Dense(1, name=f"{name_prefix}_value")(x)
-        
+    def _build_policy_head(self, features, name_prefix):
+        """構建策略輸出頭"""
+        x = layers.Dense(64, activation='relu')(features)  # 從128減少到64
+        x = layers.Dropout(self.dropout_rate)(x)
+        x = layers.Dense(32, activation='relu')(x)  # 從64減少到32
+        x = layers.Dropout(self.dropout_rate)(x)
+        policy = layers.Dense(
+            self.max_frontiers,
+            activation='softmax',
+            name=name_prefix
+        )(x)
+        return policy
+
+    def _build_value_head(self, features, name_prefix):
+        """構建價值輸出頭"""
+        x = layers.Dense(64, activation='relu')(features)  # 從128減少到64
+        x = layers.Dropout(self.dropout_rate)(x)
+        x = layers.Dense(32, activation='relu')(x)  # 從64減少到32
+        x = layers.Dropout(self.dropout_rate)(x)
+        value = layers.Dense(1, name=name_prefix)(x)
         return value
-    
+        
     def _build_actor(self):
-        """Build the complete actor model with fixed dimensions"""
-        # Input layers
+        """構建 Actor 網絡 - 確保有足夠的參數"""
+        # 輸入層
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
         robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
@@ -608,39 +579,48 @@ class EnhancedMultiRobotA2CModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 1. Perception module
-        map_features = self._build_perception_module(map_input)
-        map_features_flat = layers.Flatten()(map_features)
+        # 處理地圖輸入 - CNN網絡
+        x = layers.Conv2D(32, 3, strides=2, padding='same', activation='relu')(map_input)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        map_features = layers.Flatten()(x)
+        map_features = layers.Dense(256, activation='relu')(map_features)
         
-        # 2. State processing
-        robot1_features, robot2_features, cross_robot_features = self._build_state_processing(
-            robot1_pos, robot1_target, robot2_pos, robot2_target
-        )
+        # 處理前沿點
+        f = layers.Dense(64, activation='relu')(frontier_input)
+        f = layers.TimeDistributed(layers.Dense(32, activation='relu'))(f)
+        f = layers.GlobalAveragePooling1D()(f)
+        frontiers_features = layers.Dense(128, activation='relu')(f)
         
-        # 3. Frontier attention
-        frontier_features = self._build_frontier_attention(frontier_input)
-        frontier_features_flat = layers.Flatten()(frontier_features)
+        # 處理機器人狀態
+        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
+        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
+        robot1_feat = layers.Dense(64, activation='relu')(robot1_state)
+        robot2_feat = layers.Dense(64, activation='relu')(robot2_state)
+        robot_features = layers.Concatenate()([robot1_feat, robot2_feat])
+        robot_features = layers.Dense(128, activation='relu')(robot_features)
         
-        # 4. Temporal attention
-        temporal_features = self._build_temporal_attention(frontier_features_flat)
+        # 合併所有特徵
+        combined = layers.Concatenate()([map_features, frontiers_features, robot_features])
+        combined = layers.Dense(512, activation='relu')(combined)
+        combined = layers.Dropout(0.1)(combined)
+        combined = layers.Dense(256, activation='relu')(combined)
+        combined = layers.Dropout(0.1)(combined)
+        combined = layers.Dense(128, activation='relu')(combined)
         
-        # 5. Adaptive attention fusion
-        robot1_fusion = self._build_adaptive_fusion(
-            frontier_features_flat, cross_robot_features, 
-            temporal_features, map_features_flat
-        )
+        # 將輸出分成兩支路，增強機器人獨立性
+        robot1_branch = layers.Dense(128, activation='relu')(combined)
+        robot2_branch = layers.Dense(128, activation='relu')(combined)
         
-        robot2_fusion = self._build_adaptive_fusion(
-            frontier_features_flat, cross_robot_features, 
-            temporal_features, map_features_flat
-        )
+        # 輸出層
+        robot1_policy = layers.Dense(self.max_frontiers, activation='softmax', name='robot1_policy')(robot1_branch)
+        robot2_policy = layers.Dense(self.max_frontiers, activation='softmax', name='robot2_policy')(robot2_branch)
         
-        # 6. Actor network outputs
-        robot1_policy, robot1_logits = self._build_actor_network(robot1_fusion, "robot1")
-        robot2_policy, robot2_logits = self._build_actor_network(robot2_fusion, "robot2")
-        
-        # Create actor model
-        actor_model = models.Model(
+        # 創建模型
+        model = models.Model(
             inputs={
                 'map_input': map_input,
                 'frontier_input': frontier_input,
@@ -651,26 +631,18 @@ class EnhancedMultiRobotA2CModel:
             },
             outputs={
                 'robot1_policy': robot1_policy,
-                'robot2_policy': robot2_policy,
-                'robot1_logits': robot1_logits,
-                'robot2_logits': robot2_logits
+                'robot2_policy': robot2_policy
             }
         )
         
-        # Set optimizer
-        actor_model.optimizer = tf.keras.optimizers.Adam(
-            learning_rate=0.0001,
-            beta_1=0.9,
-            beta_2=0.999,
-            epsilon=1e-8,
-            amsgrad=True
-        )
+        # 設置優化器
+        model.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
         
-        return actor_model
-    
+        return model
+        
     def _build_critic(self):
-        """Build the complete critic model with fixed dimensions"""
-        # Input layers
+        """構建 Critic 網絡 - 確保有足夠的參數"""
+        # 輸入層 - 與Actor共享
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
         robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
@@ -678,39 +650,48 @@ class EnhancedMultiRobotA2CModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 1. Perception module
-        map_features = self._build_perception_module(map_input)
-        map_features_flat = layers.Flatten()(map_features)
+        # 處理地圖輸入 - CNN網絡
+        x = layers.Conv2D(32, 3, strides=2, padding='same', activation='relu')(map_input)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')(x)
+        x = layers.BatchNormalization()(x)
+        map_features = layers.Flatten()(x)
+        map_features = layers.Dense(256, activation='relu')(map_features)
         
-        # 2. State processing
-        robot1_features, robot2_features, cross_robot_features = self._build_state_processing(
-            robot1_pos, robot1_target, robot2_pos, robot2_target
-        )
+        # 處理前沿點
+        f = layers.Dense(64, activation='relu')(frontier_input)
+        f = layers.TimeDistributed(layers.Dense(32, activation='relu'))(f)
+        f = layers.GlobalAveragePooling1D()(f)
+        frontiers_features = layers.Dense(128, activation='relu')(f)
         
-        # 3. Frontier attention
-        frontier_features = self._build_frontier_attention(frontier_input)
-        frontier_features_flat = layers.Flatten()(frontier_features)
+        # 處理機器人狀態
+        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
+        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
+        robot1_feat = layers.Dense(64, activation='relu')(robot1_state)
+        robot2_feat = layers.Dense(64, activation='relu')(robot2_state)
+        robot_features = layers.Concatenate()([robot1_feat, robot2_feat])
+        robot_features = layers.Dense(128, activation='relu')(robot_features)
         
-        # 4. Temporal attention
-        temporal_features = self._build_temporal_attention(frontier_features_flat)
+        # 合併所有特徵
+        combined = layers.Concatenate()([map_features, frontiers_features, robot_features])
+        combined = layers.Dense(512, activation='relu')(combined)
+        combined = layers.Dropout(0.1)(combined)
+        combined = layers.Dense(256, activation='relu')(combined)
+        combined = layers.Dropout(0.1)(combined)
+        combined = layers.Dense(128, activation='relu')(combined)
         
-        # 5. Adaptive attention fusion
-        robot1_fusion = self._build_adaptive_fusion(
-            frontier_features_flat, cross_robot_features, 
-            temporal_features, map_features_flat
-        )
+        # 將輸出分成兩支路，增強機器人獨立性
+        robot1_branch = layers.Dense(128, activation='relu')(combined)
+        robot2_branch = layers.Dense(128, activation='relu')(combined)
         
-        robot2_fusion = self._build_adaptive_fusion(
-            frontier_features_flat, cross_robot_features, 
-            temporal_features, map_features_flat
-        )
+        # 輸出層 - 價值函數
+        robot1_value = layers.Dense(1, name='robot1_value')(robot1_branch)
+        robot2_value = layers.Dense(1, name='robot2_value')(robot2_branch)
         
-        # 6. Critic network outputs
-        robot1_value = self._build_critic_network(robot1_fusion, "robot1")
-        robot2_value = self._build_critic_network(robot2_fusion, "robot2")
-        
-        # Create critic model
-        critic_model = models.Model(
+        # 創建模型
+        model = models.Model(
             inputs={
                 'map_input': map_input,
                 'frontier_input': frontier_input,
@@ -725,25 +706,43 @@ class EnhancedMultiRobotA2CModel:
             }
         )
         
-        # Set optimizer and compile
-        critic_model.optimizer = tf.keras.optimizers.Adam(
-            learning_rate=0.0001,
-            beta_1=0.9,
-            beta_2=0.999,
-            epsilon=1e-8,
-            amsgrad=True
-        )
-        critic_model.compile(optimizer=critic_model.optimizer, loss='mse')
+        # 設置優化器和編譯
+        model.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+        model.compile(optimizer=model.optimizer, loss='mse')
         
-        return critic_model
+        return model
+
+    def predict_policy(self, state, frontiers, robot1_pos, robot2_pos, 
+                      robot1_target, robot2_target):
+        """預測動作概率分布"""
+        return self.actor.predict({
+            'map_input': state,
+            'frontier_input': frontiers,
+            'robot1_pos_input': robot1_pos,
+            'robot2_pos_input': robot2_pos,
+            'robot1_target_input': robot1_target,
+            'robot2_target_input': robot2_target
+        }, verbose=0)
     
-    def train_actor(self, states, frontiers, robot1_pos, robot2_pos, 
-                   robot1_target, robot2_target, robot1_actions, robot2_actions, 
-                   robot1_advantages, robot2_advantages, robot1_old_logits=None, 
-                   robot2_old_logits=None, training_history=None, episode=0):
-        """Train the actor network"""
+    def predict_value(self, state, frontiers, robot1_pos, robot2_pos, 
+                     robot1_target, robot2_target):
+        """預測狀態價值"""
+        return self.critic.predict({
+            'map_input': state,
+            'frontier_input': frontiers,
+            'robot1_pos_input': robot1_pos,
+            'robot2_pos_input': robot2_pos,
+            'robot1_target_input': robot1_target,
+            'robot2_target_input': robot2_target
+        }, verbose=0)
+    
+   
+    
+    def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
+                   robot1_target, robot2_target, actions, advantages):
+        """訓練 Actor 網絡"""
         with tf.GradientTape() as tape:
-            # Get policy predictions
+            # 取得策略預測
             policy_dict = self.actor({
                 'map_input': states,
                 'frontier_input': frontiers,
@@ -753,183 +752,58 @@ class EnhancedMultiRobotA2CModel:
                 'robot2_target_input': robot2_target
             }, training=True)
             
-            # Apply epsilon smoothing to avoid extreme values
-            epsilon = 1e-8
-            robot1_policy_smoothed = (1 - epsilon) * policy_dict['robot1_policy'] + epsilon / self.max_frontiers
-            robot2_policy_smoothed = (1 - epsilon) * policy_dict['robot2_policy'] + epsilon / self.max_frontiers
+            # 計算 Robot1 的策略損失
+            robot1_actions = actions['robot1']
+            robot1_advantages = advantages['robot1']
+            robot1_actions_one_hot = tf.one_hot(robot1_actions, self.max_frontiers)
+            robot1_probs = tf.reduce_sum(
+                policy_dict['robot1_policy'] * robot1_actions_one_hot, axis=1)
+            robot1_log_probs = tf.math.log(robot1_probs + 1e-10)
+            robot1_loss = -tf.reduce_mean(robot1_log_probs * robot1_advantages)
             
-            # Calculate log probabilities
-            actions_one_hot_1 = tf.one_hot(robot1_actions, self.max_frontiers)
-            actions_one_hot_2 = tf.one_hot(robot2_actions, self.max_frontiers)
+            # 計算 Robot2 的策略損失
+            robot2_actions = actions['robot2']
+            robot2_advantages = advantages['robot2']
+            robot2_actions_one_hot = tf.one_hot(robot2_actions, self.max_frontiers)
+            robot2_probs = tf.reduce_sum(
+                policy_dict['robot2_policy'] * robot2_actions_one_hot, axis=1)
+            robot2_log_probs = tf.math.log(robot2_probs + 1e-10)
+            robot2_loss = -tf.reduce_mean(robot2_log_probs * robot2_advantages)
             
-            log_prob_1 = tf.math.log(tf.reduce_sum(robot1_policy_smoothed * actions_one_hot_1, axis=1) + 1e-10)
-            log_prob_2 = tf.math.log(tf.reduce_sum(robot2_policy_smoothed * actions_one_hot_2, axis=1) + 1e-10)
+            # 添加熵正則化
+            entropy_coef = 0.005
+            robot1_entropy = -tf.reduce_mean(tf.reduce_sum(
+                policy_dict['robot1_policy'] * tf.math.log(policy_dict['robot1_policy'] + 1e-10), 
+                axis=1))
+            robot2_entropy = -tf.reduce_mean(tf.reduce_sum(
+                policy_dict['robot2_policy'] * tf.math.log(policy_dict['robot2_policy'] + 1e-10), 
+                axis=1))
+            entropy_reward = entropy_coef * (robot1_entropy + robot2_entropy)
             
-            # Calculate policy loss
-            policy_loss_coef = 1.0
-            
-            robot1_loss = -tf.reduce_mean(log_prob_1 * robot1_advantages) * policy_loss_coef
-            robot2_loss = -tf.reduce_mean(log_prob_2 * robot2_advantages) * policy_loss_coef
-            
-            # Add entropy regularization - get entropy coefficient dynamically
-            entropy_coef = self.get_entropy_coefficient(training_history, episode)
-            entropy_1 = -tf.reduce_mean(tf.reduce_sum(
-                robot1_policy_smoothed * tf.math.log(robot1_policy_smoothed + 1e-10), 
-                axis=1
-            ))
-            entropy_2 = -tf.reduce_mean(tf.reduce_sum(
-                robot2_policy_smoothed * tf.math.log(robot2_policy_smoothed + 1e-10), 
-                axis=1
-            ))
-            
-            entropy_reward = entropy_coef * (entropy_1 + entropy_2)
-            
-            # PPO-style ratio limiting
-            if robot1_old_logits is not None and robot2_old_logits is not None:
-                # Calculate old policy log probabilities
-                robot1_old_logits = tf.convert_to_tensor(robot1_old_logits, dtype=tf.float32)
-                robot2_old_logits = tf.convert_to_tensor(robot2_old_logits, dtype=tf.float32)
-                
-                robot1_old_policy = tf.nn.softmax(robot1_old_logits, axis=-1)
-                robot2_old_policy = tf.nn.softmax(robot2_old_logits, axis=-1)
-                
-                robot1_old_policy = (1 - epsilon) * robot1_old_policy + epsilon / self.max_frontiers
-                robot2_old_policy = (1 - epsilon) * robot2_old_policy + epsilon / self.max_frontiers
-                
-                old_log_prob_1 = tf.math.log(tf.reduce_sum(robot1_old_policy * actions_one_hot_1, axis=1) + 1e-10)
-                old_log_prob_2 = tf.math.log(tf.reduce_sum(robot2_old_policy * actions_one_hot_2, axis=1) + 1e-10)
-                
-                # Calculate probability ratios
-                ratio_1 = tf.exp(log_prob_1 - old_log_prob_1)
-                ratio_2 = tf.exp(log_prob_2 - old_log_prob_2)
-                
-                # Clip ratios
-                clip_range = 0.2
-                clipped_ratio_1 = tf.clip_by_value(ratio_1, 1 - clip_range, 1 + clip_range)
-                clipped_ratio_2 = tf.clip_by_value(ratio_2, 1 - clip_range, 1 + clip_range)
-                
-                # Calculate clipped policy loss
-                robot1_clipped_loss = -tf.reduce_mean(
-                    tf.minimum(
-                        ratio_1 * robot1_advantages,
-                        clipped_ratio_1 * robot1_advantages
-                    )
-                ) * policy_loss_coef
-                
-                robot2_clipped_loss = -tf.reduce_mean(
-                    tf.minimum(
-                        ratio_2 * robot2_advantages,
-                        clipped_ratio_2 * robot2_advantages
-                    )
-                ) * policy_loss_coef
-                
-                # Use clipped losses
-                robot1_loss = robot1_clipped_loss
-                robot2_loss = robot2_clipped_loss
-            
-            # Total policy loss
-            policy_loss = robot1_loss + robot2_loss
-            
-            # Total loss = policy loss - entropy reward
-            total_loss = policy_loss - entropy_reward
-            
-            # Add coordination loss to encourage robots to choose different actions
-            # Calculate similarity between policy distributions
-            similarity = tf.reduce_mean(
-                tf.reduce_sum(
-                    tf.sqrt(robot1_policy_smoothed * robot2_policy_smoothed), 
-                    axis=1
-                )
-            )
-            
-            # Coordination coefficient
-            coordination_coef = 0.1
+            # 計算協調損失 - 鼓勵不同的策略
+            coordination_coef = 0.2
+            similarity = tf.reduce_mean(tf.reduce_sum(
+                tf.sqrt(policy_dict['robot1_policy'] * policy_dict['robot2_policy']), axis=1))
             coordination_loss = coordination_coef * similarity
             
-            # Add coordination loss to total loss
-            total_loss += coordination_loss
+            # 總損失
+            policy_loss = robot1_loss + robot2_loss
+            total_loss = policy_loss - entropy_reward + coordination_loss
         
-        # Calculate gradients
+        # 計算梯度並更新
         grads = tape.gradient(total_loss, self.actor.trainable_variables)
+        # 梯度裁剪
+        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        self.actor.optimizer.apply_gradients(zip(grads, self.actor.trainable_variables))
         
-        # Gradient processing
-        # Replace NaN gradients with zeros
-        grads = [tf.where(tf.math.is_nan(g), tf.zeros_like(g), g) if g is not None else g for g in grads]
-        
-        # Gradient clipping to avoid gradient explosion
-        clipped_grads, grad_norm = tf.clip_by_global_norm(grads, 1.0)
-        
-        # Apply gradients
-        self.actor.optimizer.apply_gradients(zip(clipped_grads, self.actor.trainable_variables))
-        
-        # Return metrics
-        metrics = {
-            'total_policy_loss': total_loss,
-            'robot1_policy_loss': robot1_loss,
-            'robot2_policy_loss': robot2_loss,
-            'robot1_entropy': entropy_1,
-            'robot2_entropy': entropy_2,
-            'entropy_coef': entropy_coef,
-            'coordination_loss': coordination_loss,
-            'gradient_norm': grad_norm
-        }
-        
-        return metrics
-    
-    def get_entropy_coefficient(self, training_history=None, episode=0):
-        """Dynamically adjust entropy coefficient to balance exploration and exploitation"""
-        # Default base entropy coefficient
-        base_coef = 0.01
-        
-        # Use higher coefficient for early training to promote exploration
-        if training_history is None or episode < 20:
-            return 0.05
-        
-        # Calculate recent entropy values (if available)
-        if ('robot1_entropy' in training_history and 
-            len(training_history['robot1_entropy']) > 0):
-            
-            recent_entropy1 = np.mean(training_history['robot1_entropy'][-10:])
-            recent_entropy2 = np.mean(training_history['robot2_entropy'][-10:])
-            avg_entropy = (recent_entropy1 + recent_entropy2) / 2
-            
-            # Theoretical maximum entropy (uniform distribution)
-            max_entropy = np.log(self.max_frontiers)
-            
-            # Calculate entropy ratio
-            entropy_ratio = avg_entropy / max_entropy if max_entropy > 0 else 0
-            
-            # Adjust coefficient based on entropy ratio
-            if entropy_ratio < 0.3:
-                # Entropy too low, increase coefficient to promote exploration
-                coef = base_coef * 2.0
-            elif entropy_ratio > 0.7:
-                # Entropy too high, decrease coefficient to promote exploitation
-                coef = base_coef * 0.5
-            else:
-                # Entropy in reasonable range
-                coef = base_coef
-                
-        else:
-            # No entropy history, use default value
-            coef = base_coef
-        
-        # Periodically increase entropy coefficient to avoid local optima
-        if episode % 100 == 0 and episode > 0:
-            # Increase coefficient every 100 episodes
-            coef = coef * 1.5
-        
-        # Limit coefficient range
-        coef = np.clip(coef, 0.001, 0.1)
-        
-        return coef
+        return total_loss
     
     def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
-                    robot1_target, robot2_target, robot1_returns, robot2_returns):
-        """Train the critic network with improved gradient handling"""
+                    robot1_target, robot2_target, returns):
+        """訓練 Critic 網絡"""
         with tf.GradientTape() as tape:
-            # Get value predictions
-            values = self.critic({
+            # 取得價值預測
+            value_dict = self.critic({
                 'map_input': states,
                 'frontier_input': frontiers,
                 'robot1_pos_input': robot1_pos,
@@ -938,301 +812,217 @@ class EnhancedMultiRobotA2CModel:
                 'robot2_target_input': robot2_target
             }, training=True)
             
-            # Calculate value losses using Huber loss to handle outliers
-            robot1_value_loss = tf.keras.losses.Huber(delta=1.0)(
-                robot1_returns, values['robot1_value'])
+            # 計算價值損失
+            robot1_returns = returns['robot1']
+            robot2_returns = returns['robot2']
             
-            robot2_value_loss = tf.keras.losses.Huber(delta=1.0)(
-                robot2_returns, values['robot2_value'])
+            robot1_value_loss = tf.keras.losses.Huber()(
+                robot1_returns, value_dict['robot1_value'])
+            robot2_value_loss = tf.keras.losses.Huber()(
+                robot2_returns, value_dict['robot2_value'])
             
-            # Total value loss
+            # 總損失
             value_loss = robot1_value_loss + robot2_value_loss
         
-        # Calculate gradients
+        # 計算梯度並更新
         grads = tape.gradient(value_loss, self.critic.trainable_variables)
+        # 梯度裁剪
+        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        self.critic.optimizer.apply_gradients(zip(grads, self.critic.trainable_variables))
         
-        # Gradient processing
-        # Replace NaN gradients with zeros
-        grads = [tf.where(tf.math.is_nan(g), tf.zeros_like(g), g) if g is not None else g for g in grads]
-        
-        # Clip abnormal gradients
-        clipped_grads = []
-        for g in grads:
-            if g is not None:
-                # Detect abnormally large gradients
-                norm = tf.norm(g)
-                
-                # Clip if norm is too large
-                if norm > 1.0:
-                    g = g * (1.0 / norm)
-            clipped_grads.append(g)
-        
-        # Global gradient clipping - stricter for critic
-        clipped_grads, _ = tf.clip_by_global_norm(clipped_grads, 0.5)
-        
-        # Apply gradients
-        self.critic.optimizer.apply_gradients(zip(clipped_grads, self.critic.trainable_variables))
-        
-        return {
-            'total_value_loss': value_loss,
-            'robot1_value_loss': robot1_value_loss,
-            'robot2_value_loss': robot2_value_loss
-        }
+        return value_loss
     
-    def train_batch(self, states, frontiers, robot1_pos, robot2_pos, 
-                  robot1_target, robot2_target, robot1_actions, robot2_actions, 
-                  robot1_advantages, robot2_advantages, robot1_returns, robot2_returns,
-                  robot1_old_values, robot2_old_values, robot1_old_logits, robot2_old_logits,
-                  training_history=None):
-        """Train both actor and critic networks on a batch of data"""
-        # Get current episode for entropy calculation
-        current_episode = len(training_history['episode_rewards']) if training_history else 0
+    def _compute_policy_loss(self, policy, actions, advantages):
+        """計算策略損失
         
-        # Train actor
-        actor_metrics = self.train_actor(
-            states, frontiers, robot1_pos, robot2_pos, 
-            robot1_target, robot2_target, robot1_actions, robot2_actions, 
-            robot1_advantages, robot2_advantages, robot1_old_logits, robot2_old_logits,
-            training_history, current_episode
-        )
+        Args:
+            policy: 策略網絡輸出的動作概率分布
+            actions: 實際執行的動作
+            advantages: 計算出的優勢值
         
-        # Train critic
-        critic_metrics = self.train_critic(
-            states, frontiers, robot1_pos, robot2_pos, 
-            robot1_target, robot2_target, robot1_returns, robot2_returns
-        )
+        Returns:
+            policy_loss: 策略損失值
+        """
+        # 將動作轉換為 one-hot 編碼
+        actions_one_hot = tf.one_hot(actions, self.max_frontiers)
         
-        # Calculate entropy for monitoring
-        policy_dict = self.actor.predict({
-            'map_input': states,
-            'frontier_input': frontiers,
-            'robot1_pos_input': robot1_pos,
-            'robot2_pos_input': robot2_pos,
-            'robot1_target_input': robot1_target,
-            'robot2_target_input': robot2_target
-        }, verbose=0)
+        # 計算所選動作的對數概率
+        log_prob = tf.math.log(tf.reduce_sum(policy * actions_one_hot, axis=1) + 1e-10)
         
-        # Calculate entropy with epsilon smoothing
-        epsilon = 1e-8
-        robot1_policy = policy_dict['robot1_policy']
-        robot2_policy = policy_dict['robot2_policy']
+        # 計算策略損失
+        policy_loss = -tf.reduce_mean(log_prob * advantages)
         
-        robot1_policy_smoothed = (1 - epsilon) * robot1_policy + epsilon / self.max_frontiers
-        robot2_policy_smoothed = (1 - epsilon) * robot2_policy + epsilon / self.max_frontiers
+        # 添加熵正則化以鼓勵探索，但減少熵權重
+        entropy = -tf.reduce_sum(policy * tf.math.log(policy + 1e-10), axis=1)
+        entropy_bonus = 0.005 * tf.reduce_mean(entropy)  # 從0.01減少到0.005
         
-        robot1_entropy = -tf.reduce_mean(tf.reduce_sum(
-            robot1_policy_smoothed * tf.math.log(robot1_policy_smoothed + 1e-10), 
-            axis=1
-        ))
-        robot2_entropy = -tf.reduce_mean(tf.reduce_sum(
-            robot2_policy_smoothed * tf.math.log(robot2_policy_smoothed + 1e-10), 
-            axis=1
-        ))
-        
-        # Combine all metrics
-        return {
-            'total_loss': actor_metrics['total_policy_loss'] + critic_metrics['total_value_loss'],
-            'robot1_policy_loss': actor_metrics['robot1_policy_loss'],
-            'robot2_policy_loss': actor_metrics['robot2_policy_loss'],
-            'robot1_value_loss': critic_metrics['robot1_value_loss'],
-            'robot2_value_loss': critic_metrics['robot2_value_loss'],
-            'robot1_entropy': robot1_entropy,
-            'robot2_entropy': robot2_entropy,
-            'gradient_norm': actor_metrics.get('gradient_norm', 0.0)
-        }
-    
-    def predict(self, state, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target):
-        """Predict action distributions and state values"""
-        # Ensure input shapes are correct
-        if len(state.shape) == 3:
-            state = np.expand_dims(state, 0)
-        if len(frontiers.shape) == 2:
-            frontiers = np.expand_dims(frontiers, 0)
-        if len(robot1_pos.shape) == 1:
-            robot1_pos = np.expand_dims(robot1_pos, 0)
-        if len(robot2_pos.shape) == 1:
-            robot2_pos = np.expand_dims(robot2_pos, 0)
-        if len(robot1_target.shape) == 1:
-            robot1_target = np.expand_dims(robot1_target, 0)
-        if len(robot2_target.shape) == 1:
-            robot2_target = np.expand_dims(robot2_target, 0)
-        
-        # Build input dictionary
-        inputs = {
-            'map_input': state,
-            'frontier_input': frontiers,
-            'robot1_pos_input': robot1_pos,
-            'robot2_pos_input': robot2_pos,
-            'robot1_target_input': robot1_target,
-            'robot2_target_input': robot2_target
-        }
-        
-        # Get actor outputs
-        actor_outputs = self.actor.predict(inputs, verbose=0)
-        
-        # Get critic outputs
-        critic_outputs = self.critic.predict(inputs, verbose=0)
-        
-        # Validate policy outputs
-        for key in ['robot1_policy', 'robot2_policy']:
-            policy = actor_outputs[key]
-            if np.any(np.isnan(policy)):
-                print(f"Warning: {key} contains NaN values, replacing with uniform distribution")
-                actor_outputs[key] = np.ones_like(policy) / policy.shape[-1]
-            elif np.any(policy < 0) or np.any(policy > 1):
-                print(f"Warning: {key} contains out-of-range values, clipping")
-                actor_outputs[key] = np.clip(policy, 0, 1)
-                # Renormalize
-                actor_outputs[key] = actor_outputs[key] / np.sum(actor_outputs[key], axis=-1, keepdims=True)
-        
-        # Return prediction results
-        return {
-            'robot1_policy': actor_outputs['robot1_policy'],
-            'robot2_policy': actor_outputs['robot2_policy'],
-            'robot1_value': critic_outputs['robot1_value'],
-            'robot2_value': critic_outputs['robot2_value'],
-            'robot1_logits': actor_outputs['robot1_logits'],
-            'robot2_logits': actor_outputs['robot2_logits']
-        }
-    
-    def compute_returns_and_advantages(self, rewards, values, dones, next_value):
-        """Compute returns and advantages using GAE (Generalized Advantage Estimation)"""
-        returns = np.zeros_like(rewards)
-        advantages = np.zeros_like(rewards)
-        
-        gae = 0
-        
-        # Keep rewards scaled reasonably
-        reward_scale = 1.0
-        scaled_rewards = rewards * reward_scale
-        
-        # GAE parameters
-        gamma = 0.99  # Discount factor
-        lambda_param = 0.95  # GAE lambda parameter
-        
-        # Compute backwards
-        for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_non_terminal = 1.0 - dones[t]
-                next_val = next_value
-            else:
-                next_non_terminal = 1.0 - dones[t+1]
-                next_val = values[t+1]
-            
-            # Calculate TD error
-            delta = scaled_rewards[t] + gamma * next_val * next_non_terminal - values[t]
-            
-            # Calculate GAE
-            gae = delta + gamma * lambda_param * next_non_terminal * gae
-            
-            # Store advantage and return
-            advantages[t] = gae
-            returns[t] = advantages[t] + values[t]
-        
-        # Robust normalization
-        adv_mean = np.mean(advantages)
-        adv_std = np.std(advantages) + 1e-8
-        
-        # Normalize advantages
-        normalized_advantages = (advantages - adv_mean) / adv_std
-        
-        # Limit range to avoid extreme values
-        max_value = 15.0
-        normalized_advantages = np.clip(normalized_advantages, -max_value, max_value)
-        
-        return returns, normalized_advantages
+        return policy_loss - entropy_bonus
     
     def save(self, filepath):
-        """Save model as .h5 format"""
-        # Save actor model
-        actor_path = filepath + '_actor.h5'
-        print(f"Saving actor model to: {actor_path}")
-        self.actor.save(actor_path, save_format='h5')
+        """保存模型 - 僅使用 .h5 格式"""
+        print("\n開始保存模型...")
         
-        # Save critic model
-        critic_path = filepath + '_critic.h5'
-        print(f"Saving critic model to: {critic_path}")
-        self.critic.save(critic_path, save_format='h5')
+        # 創建目錄（如果不存在）
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
         
-        # Save additional configuration
-        config = {
-            'input_shape': self.input_shape,
-            'max_frontiers': self.max_frontiers,
-            'd_model': self.d_model,
-            'entropy_beta': self.entropy_beta,
-            'value_loss_weight': self.value_loss_weight
-        }
+        try:
+            # 1. 保存完整模型 (.h5 格式)
+            actor_path = filepath + '_actor.h5'
+            critic_path = filepath + '_critic.h5'
+            
+            print(f"保存 Actor 模型到: {actor_path}")
+            self.actor.save(actor_path, save_format='h5')
+            
+            print(f"保存 Critic 模型到: {critic_path}")
+            self.critic.save(critic_path, save_format='h5')
+            
+            # 2. 保存配置 (小型 JSON 檔案)
+            config = {
+                'input_shape': self.input_shape,
+                'max_frontiers': self.max_frontiers,
+                'd_model': self.d_model,
+                'num_heads': self.num_heads,
+                'dff': self.dff,
+                'dropout_rate': self.dropout_rate,
+                'actor_params': self.actor.count_params(),
+                'critic_params': self.critic.count_params(),
+                'save_time': str(np.datetime64('now'))
+            }
+            
+            config_path = filepath + '_config.json'
+            print(f"保存配置到: {config_path}")
+            
+            with open(config_path, 'w') as f:
+                # 將元組轉換為列表以便 JSON 序列化
+                config['input_shape'] = list(config['input_shape'])
+                json.dump(config, f, indent=4)
+            
+            # 3. 驗證保存的檔案
+            actor_size = os.path.getsize(actor_path) / (1024 * 1024)
+            critic_size = os.path.getsize(critic_path) / (1024 * 1024)
+            total_size = actor_size + critic_size
+            
+            print("\n保存的檔案大小:")
+            print(f"Actor 模型: {actor_size:.2f} MB")
+            print(f"Critic 模型: {critic_size:.2f} MB")
+            print(f"總計: {total_size:.2f} MB")
+            
+            # 4. 驗證檔案大小是否合理
+            expected_size = (self.actor.count_params() + self.critic.count_params()) * 4 / (1024 * 1024)
+            print(f"預期大小 (基於參數數量): {expected_size:.2f} MB")
+            
+            if total_size < expected_size * 0.5:
+                print("\n警告: 保存檔案大小顯著小於預期!")
+            else:
+                print("\n保存成功: 檔案大小合理")
+            
+            return True
         
-        with open(filepath + '_config.json', 'w') as f:
-            json.dump(config, f)
-        
-        print(f"Model saved in .h5 format")
-    
+        except Exception as e:
+            print(f"保存模型時出錯: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def load(self, filepath):
-        """Load model from .h5 format"""
-        # Create custom objects dictionary
-        custom_objects = {
-            'LayerNormalization': LayerNormalization,
-            'SpatialAttention': SpatialAttention,
-            'PositionalEncoding': PositionalEncoding,
-            'AdaptiveAttentionFusion': AdaptiveAttentionFusion,
-            'TemporalAttentionModule': TemporalAttentionModule, 
-            'PerceptionModule': PerceptionModule,
-            'CrossRobotAttention': CrossRobotAttention,
-            'FrontierAttentionLayer': FrontierAttentionLayer
+        """載入模型 - 僅使用 .h5 格式"""
+        print("\n開始載入模型...")
+        
+        actor_path = filepath + '_actor.h5'
+        critic_path = filepath + '_critic.h5'
+        config_path = filepath + '_config.json'
+        
+        if not os.path.exists(actor_path) or not os.path.exists(critic_path):
+            print(f"錯誤: 找不到模型檔案: {actor_path} 或 {critic_path}")
+            return False
+        
+        try:
+            # 1. 載入配置
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                # 更新模型配置
+                self.input_shape = tuple(config['input_shape'])
+                self.max_frontiers = config['max_frontiers']
+                self.d_model = config.get('d_model', 128)
+                self.num_heads = config.get('num_heads', 4)
+                self.dff = config.get('dff', 256)
+                self.dropout_rate = config.get('dropout_rate', 0.1)
+                
+                print(f"已載入配置，預期模型參數: Actor {config.get('actor_params', 'N/A'):,}, " + 
+                    f"Critic {config.get('critic_params', 'N/A'):,}")
+                
+                if 'save_time' in config:
+                    print(f"模型保存時間: {config['save_time']}")
+            
+            # 2. 載入模型
+            print(f"載入 Actor 模型: {actor_path}")
+            self.actor = tf.keras.models.load_model(actor_path)
+            
+            print(f"載入 Critic 模型: {critic_path}")
+            self.critic = tf.keras.models.load_model(critic_path)
+            
+            # 3. 確保優化器設置
+            if not hasattr(self.actor, 'optimizer') or self.actor.optimizer is None:
+                self.actor.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+            
+            if not hasattr(self.critic, 'optimizer') or self.critic.optimizer is None:
+                self.critic.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+                self.critic.compile(optimizer=self.critic.optimizer, loss='mse')
+            
+            # 4. 驗證載入結果
+            actor_params = self.actor.count_params()
+            critic_params = self.critic.count_params()
+            total_params = actor_params + critic_params
+            
+            print(f"\n載入完成:")
+            print(f"Actor 參數: {actor_params:,}")
+            print(f"Critic 參數: {critic_params:,}")
+            print(f"總參數: {total_params:,}")
+            print(f"理論檔案大小: {total_params * 4 / (1024 * 1024):.2f} MB")
+            
+            if config.get('actor_params') and actor_params != config['actor_params']:
+                print(f"警告: Actor 參數數量與配置不符! 預期: {config['actor_params']:,}, 實際: {actor_params:,}")
+                
+            if config.get('critic_params') and critic_params != config['critic_params']:
+                print(f"警告: Critic 參數數量與配置不符! 預期: {config['critic_params']:,}, 實際: {critic_params:,}")
+            
+            print("\n模型載入成功")
+            return True
+        
+        except Exception as e:
+            print(f"載入模型時出錯: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def verify_model(self):
+        """驗證模型"""
+        print("驗證模型...")
+        test_inputs = {
+            'map_input': np.zeros((1, *self.input_shape)),
+            'frontier_input': np.zeros((1, self.max_frontiers, 2)),
+            'robot1_pos_input': np.zeros((1, 2)),
+            'robot2_pos_input': np.zeros((1, 2)),
+            'robot1_target_input': np.zeros((1, 2)),
+            'robot2_target_input': np.zeros((1, 2))
         }
         
         try:
-            # Load configuration
-            with open(filepath + '_config.json', 'r') as f:
-                config = json.load(f)
+            # 測試前向傳播
+            actor_outputs = self.actor.predict(test_inputs, verbose=0)
+            critic_outputs = self.critic.predict(test_inputs, verbose=0)
             
-            # Update model configuration
-            self.input_shape = tuple(config['input_shape'])
-            self.max_frontiers = config['max_frontiers']
-            self.d_model = config['d_model']
-            self.entropy_beta = config['entropy_beta']
-            self.value_loss_weight = config['value_loss_weight']
+            # 檢查輸出形狀
+            assert actor_outputs['robot1_policy'].shape == (1, self.max_frontiers)
+            assert actor_outputs['robot2_policy'].shape == (1, self.max_frontiers)
+            assert critic_outputs['robot1_value'].shape == (1, 1)
+            assert critic_outputs['robot2_value'].shape == (1, 1)
             
-            # Load actor model
-            actor_path = filepath + '_actor.h5'
-            print(f"Loading actor model: {actor_path}")
-            self.actor = tf.keras.models.load_model(
-                actor_path,
-                custom_objects=custom_objects
-            )
-            
-            # Load critic model
-            critic_path = filepath + '_critic.h5'
-            print(f"Loading critic model: {critic_path}")
-            self.critic = tf.keras.models.load_model(
-                critic_path,
-                custom_objects=custom_objects
-            )
-            
-            # Set optimizers if not present
-            if not hasattr(self.actor, 'optimizer') or self.actor.optimizer is None:
-                self.actor.optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.0001,
-                    beta_1=0.9,
-                    beta_2=0.999,
-                    epsilon=1e-8,
-                    amsgrad=True
-                )
-            
-            if not hasattr(self.critic, 'optimizer') or self.critic.optimizer is None:
-                self.critic.optimizer = tf.keras.optimizers.Adam(
-                    learning_rate=0.0001,
-                    beta_1=0.9,
-                    beta_2=0.999,
-                    epsilon=1e-8,
-                    amsgrad=True
-                )
-                self.critic.compile(optimizer=self.critic.optimizer, loss='mse')
-            
-            print("Model loaded successfully")
+            print("模型驗證通過")
             return True
             
         except Exception as e:
-            print(f"Error loading model: {str(e)}")
+            print(f"模型驗證失敗: {str(e)}")
             return False
