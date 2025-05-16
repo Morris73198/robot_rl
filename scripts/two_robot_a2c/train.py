@@ -12,9 +12,10 @@ import matplotlib.pyplot as plt
 matplotlib.use('TkAgg')
 plt.ion()
 
+
 def main():
     try:
-        # 指定模型路徑（actor和critic分開保存）
+        # 指定模型路徑（使用 h5 格式）
         model_path = os.path.join(MODEL_DIR, 'multi_robot_model_ac')
         
         # 創建模型
@@ -26,12 +27,14 @@ def main():
         
         start_episode = 0
         
-        # 載入已有的模型（如果存在）
-        if os.path.exists(model_path + '_actor') and os.path.exists(model_path + '_critic'):
+        # 載入已有的模型（h5 格式）
+        actor_path = model_path + '_actor.h5'
+        critic_path = model_path + '_critic.h5'
+        if os.path.exists(actor_path) and os.path.exists(critic_path):
             print(f"Loading existing model from: {model_path}")
             model.load(model_path)
             # 獲取起始episode（從文件名解析）
-            existing_models = [f for f in os.listdir(MODEL_DIR) if f.startswith('multi_robot_model_ac_ep')]
+            existing_models = [f for f in os.listdir(MODEL_DIR) if f.startswith('multi_robot_model_ac_ep') and f.endswith('_actor.h5')]
             if existing_models:
                 latest_ep = max([int(f.split('ep')[-1].split('_')[0]) for f in existing_models])
                 start_episode = latest_ep
