@@ -2,8 +2,10 @@ import os
 import sys
 from two_robot_a2c_enhance.models.multi_robot_network import MultiRobotACModel
 from two_robot_a2c_enhance.models.multi_robot_trainer import MultiRobotACTrainer
-from two_robot_a2c_enhance.environment.multi_robot import Robot
+from two_robot_a2c_enhance.environment.multi_robot_no_unknown import Robot
 from two_robot_a2c_enhance.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
+# 引入 RobotIndividualMapTracker
+from two_robot_a2c_enhance.environment.robot_local_map_tracker import RobotIndividualMapTracker
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -46,6 +48,14 @@ def main():
             plot=True
         )
         
+        # 創建機器人個人地圖追蹤器
+        print("Creating robot individual map tracker...")
+        map_tracker = RobotIndividualMapTracker(
+            robot1=robot1,
+            robot2=robot2,
+            save_dir='robot_individual_maps'
+        )
+        
         # 創建Actor-Critic訓練器
         print("Creating Actor-Critic trainer...")
         trainer = MultiRobotACTrainer(
@@ -56,11 +66,68 @@ def main():
             gae_lambda=0.95  # GAE lambda parameter
         )
         
+        # 將地圖追蹤器添加到訓練器中
+        trainer.map_tracker = map_tracker
+        
+        # 修改訓練器的 train 方法以使用地圖追蹤器
+        original_train = trainer.train
+        
+        def train_with_tracker(*args, **kwargs):
+            # 開始追蹤
+            trainer.map_tracker.start_tracking()
+            
+            # 保存原始的 train_on_episode 方法
+            original_train_on_episode = trainer.train_on_episode
+            
+            def train_on_episode_with_tracker():
+                # 獲取交集百分比
+                overlap_ratio = trainer.map_tracker.calculate_overlap()
+                print(f"Episode overlap ratio: {overlap_ratio:.2%}")
+                
+                # 記錄覆蓋率圖表
+                if hasattr(trainer, 'training_history'):
+                    if 'overlap_ratios' not in trainer.training_history:
+                        trainer.training_history['overlap_ratios'] = []
+                    trainer.training_history['overlap_ratios'].append(float(overlap_ratio))
+                
+                # 調用原始方法
+                return original_train_on_episode()
+            
+            # 替換方法
+            trainer.train_on_episode = train_on_episode_with_tracker
+            
+            # 調用原始的 train 方法
+            result = original_train(*args, **kwargs)
+            
+            # 停止追蹤並生成覆蓋率圖表
+            trainer.map_tracker.stop_tracking()
+            trainer.map_tracker.plot_coverage_over_time()
+            
+            # 恢復原始方法
+            trainer.train_on_episode = original_train_on_episode
+            
+            return result
+        
+        # 替換訓練方法
+        trainer.train = train_with_tracker
+        
+        # 修改訓練循環中的一部分，添加地圖追蹤更新
+        original_reset_episode_buffer = trainer.reset_episode_buffer
+        
+        def reset_episode_buffer_with_tracker():
+            original_reset_episode_buffer()
+            # 初始化或重置地圖追蹤器
+            if hasattr(trainer, 'map_tracker'):
+                trainer.map_tracker.start_tracking()
+        
+        # 替換方法
+        trainer.reset_episode_buffer = reset_episode_buffer_with_tracker
+        
         # 確保模型保存目錄存在
         if not os.path.exists(MODEL_DIR):
             os.makedirs(MODEL_DIR)
             
-        print("Starting Actor-Critic training...")
+        print("Starting Actor-Critic training with map tracking...")
         remaining_episodes = max(0, TRAIN_CONFIG['episodes'] - start_episode)
         
         # 開始訓練
@@ -77,6 +144,9 @@ def main():
     finally:
         plt.ioff()
         plt.close('all')
+        # 確保清理地圖追蹤器資源
+        if 'map_tracker' in locals() and map_tracker is not None:
+            map_tracker.cleanup()
 
 if __name__ == '__main__':
     main()
