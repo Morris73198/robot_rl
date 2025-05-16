@@ -1,2 +1,5 @@
-from .multi_robot_network import MultiRobotA2CModel
-from .multi_robot_trainer import MultiRobotA2CTrainer
+# 移除或註釋掉所有導入語句
+# 保持檔案簡單
+__version__ = "0.1.0"
+
+# 不要在這裡導入任何模組，避免循環導入
