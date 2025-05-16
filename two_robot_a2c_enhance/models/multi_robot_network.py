@@ -739,7 +739,7 @@ class MultiRobotACModel:
    
     
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
-                   robot1_target, robot2_target, actions, advantages):
+                robot1_target, robot2_target, actions, advantages):
         """訓練 Actor 網絡"""
         with tf.GradientTape() as tape:
             # 取得策略預測
@@ -756,47 +756,72 @@ class MultiRobotACModel:
             robot1_actions = actions['robot1']
             robot1_advantages = advantages['robot1']
             robot1_actions_one_hot = tf.one_hot(robot1_actions, self.max_frontiers)
-            robot1_probs = tf.reduce_sum(
-                policy_dict['robot1_policy'] * robot1_actions_one_hot, axis=1)
-            robot1_log_probs = tf.math.log(robot1_probs + 1e-10)
+            
+            # 添加數值穩定性處理
+            robot1_policy = tf.clip_by_value(policy_dict['robot1_policy'], 1e-8, 1.0)
+            robot1_policy = robot1_policy / tf.reduce_sum(robot1_policy, axis=1, keepdims=True)
+            
+            robot1_probs = tf.reduce_sum(robot1_policy * robot1_actions_one_hot, axis=1)
+            robot1_log_probs = tf.math.log(robot1_probs)
             robot1_loss = -tf.reduce_mean(robot1_log_probs * robot1_advantages)
             
             # 計算 Robot2 的策略損失
             robot2_actions = actions['robot2']
             robot2_advantages = advantages['robot2']
             robot2_actions_one_hot = tf.one_hot(robot2_actions, self.max_frontiers)
-            robot2_probs = tf.reduce_sum(
-                policy_dict['robot2_policy'] * robot2_actions_one_hot, axis=1)
-            robot2_log_probs = tf.math.log(robot2_probs + 1e-10)
+            
+            # 添加數值穩定性處理
+            robot2_policy = tf.clip_by_value(policy_dict['robot2_policy'], 1e-8, 1.0)
+            robot2_policy = robot2_policy / tf.reduce_sum(robot2_policy, axis=1, keepdims=True)
+            
+            robot2_probs = tf.reduce_sum(robot2_policy * robot2_actions_one_hot, axis=1)
+            robot2_log_probs = tf.math.log(robot2_probs)
             robot2_loss = -tf.reduce_mean(robot2_log_probs * robot2_advantages)
             
             # 添加熵正則化
             entropy_coef = 0.005
             robot1_entropy = -tf.reduce_mean(tf.reduce_sum(
-                policy_dict['robot1_policy'] * tf.math.log(policy_dict['robot1_policy'] + 1e-10), 
+                robot1_policy * tf.math.log(robot1_policy), 
                 axis=1))
             robot2_entropy = -tf.reduce_mean(tf.reduce_sum(
-                policy_dict['robot2_policy'] * tf.math.log(policy_dict['robot2_policy'] + 1e-10), 
+                robot2_policy * tf.math.log(robot2_policy), 
                 axis=1))
             entropy_reward = entropy_coef * (robot1_entropy + robot2_entropy)
             
             # 計算協調損失 - 鼓勵不同的策略
             coordination_coef = 0.2
             similarity = tf.reduce_mean(tf.reduce_sum(
-                tf.sqrt(policy_dict['robot1_policy'] * policy_dict['robot2_policy']), axis=1))
+                tf.sqrt(robot1_policy * robot2_policy), axis=1))
             coordination_loss = coordination_coef * similarity
+            
+            # 添加L2正則化以防止權重爆炸
+            l2_reg = 0.001
+            l2_loss = tf.add_n([tf.reduce_sum(tf.square(w)) for w in self.actor.trainable_weights if 'kernel' in w.name]) * l2_reg
             
             # 總損失
             policy_loss = robot1_loss + robot2_loss
-            total_loss = policy_loss - entropy_reward + coordination_loss
+            total_loss = policy_loss - entropy_reward + coordination_loss + l2_loss
         
         # 計算梯度並更新
         grads = tape.gradient(total_loss, self.actor.trainable_variables)
-        # 梯度裁剪
-        grads, _ = tf.clip_by_global_norm(grads, 0.5)
+        
+        # 梯度裁剪 - 使用更嚴格的值
+        grads, grad_norm = tf.clip_by_global_norm(grads, 0.5)
+        
+        # 檢查梯度是否包含NaN
+        if tf.reduce_any([tf.reduce_any(tf.math.is_nan(g)) for g in grads if g is not None]):
+            print("警告: Actor訓練中檢測到NaN梯度")
+            # 返回一個固定的損失值，不更新參數
+            return 0.0
+        
+        # 檢查梯度範數，如果過大則跳過更新
+        if tf.math.is_nan(grad_norm) or grad_norm > 10.0:
+            print(f"警告: 檢測到較大的梯度範數: {grad_norm}, 跳過更新")
+            return float(total_loss)
+        
         self.actor.optimizer.apply_gradients(zip(grads, self.actor.trainable_variables))
         
-        return total_loss
+        return float(total_loss)
     
     def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target, returns):
