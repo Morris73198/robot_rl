@@ -1,8 +1,5 @@
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-# 直接導入所需的模組
 from two_robot_a2c.models.multi_robot_network import MultiRobotACModel
 from two_robot_a2c.models.multi_robot_trainer import MultiRobotACTrainer
 from two_robot_a2c.environment.multi_robot_no_unknown import Robot
