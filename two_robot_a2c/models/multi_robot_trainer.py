@@ -681,7 +681,7 @@ class MultiRobotACTrainer:
         model_path = os.path.join(MODEL_DIR, f'multi_robot_model_ac_ep{ep_str}')
         print(f"\n正在保存檢查點 #{episode} 到: {model_path}")
         
-        # 保存模型
+        # 保存模型 (使用 h5 格式)
         save_result = self.model.save(model_path)
         
         if not save_result:

@@ -553,17 +553,19 @@ class MultiRobotACModel:
         return policy_loss - entropy_bonus
     
     def save(self, filepath):
-        """保存模型"""
+        """保存模型到 h5 格式"""
         print("保存模型...")
         
         try:
             # 保存 Actor
-            print(f"保存 actor 模型到: {filepath}_actor")
-            self.actor.save(filepath + '_actor', save_format='tf')
+            actor_path = filepath + '_actor.h5'
+            print(f"保存 actor 模型到: {actor_path}")
+            self.actor.save(actor_path, save_format='h5')
             
             # 保存 Critic
-            print(f"保存 critic 模型到: {filepath}_critic")
-            self.critic.save(filepath + '_critic', save_format='tf')
+            critic_path = filepath + '_critic.h5'
+            print(f"保存 critic 模型到: {critic_path}")
+            self.critic.save(critic_path, save_format='h5')
             
             # 保存配置
             config = {
@@ -584,9 +586,9 @@ class MultiRobotACModel:
         except Exception as e:
             print(f"保存模型時出錯: {str(e)}")
             return False
-    
+
     def load(self, filepath):
-        """載入模型"""
+        """載入 h5 格式的模型"""
         print("載入模型...")
         
         try:
@@ -612,15 +614,17 @@ class MultiRobotACModel:
             }
             
             # 載入模型
-            print(f"載入 actor 模型: {filepath}_actor")
+            actor_path = filepath + '_actor.h5'
+            critic_path = filepath + '_critic.h5'
+            print(f"載入 actor 模型: {actor_path}")
             self.actor = tf.keras.models.load_model(
-                filepath + '_actor',
+                actor_path,
                 custom_objects=custom_objects
             )
             
-            print(f"載入 critic 模型: {filepath}_critic")
+            print(f"載入 critic 模型: {critic_path}")
             self.critic = tf.keras.models.load_model(
-                filepath + '_critic',
+                critic_path,
                 custom_objects=custom_objects
             )
             
