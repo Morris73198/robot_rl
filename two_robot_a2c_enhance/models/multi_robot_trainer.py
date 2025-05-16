@@ -25,7 +25,8 @@ class MultiRobotACTrainer:
             'critic_losses': [],
             'robot1_rewards': [],
             'robot2_rewards': [],
-            'exploration_progress': []
+            'exploration_progress': [],
+            'overlap_ratios': []  # 新增: 記錄機器人探索區域的交集比例
         }
         
         # 添加收斂檢查相關的參數
@@ -35,6 +36,9 @@ class MultiRobotACTrainer:
         self.target_exploration_rate = 0.95  # 目標探索完成率
         # 經驗緩衝區用於儲存當前episode的軌跡
         self.reset_episode_buffer()
+        
+        # 地圖追蹤器（將由 train.py 設置）
+        self.map_tracker = None
 
     def reset_episode_buffer(self):
         """重置episode緩衝區"""
@@ -83,8 +87,8 @@ class MultiRobotACTrainer:
         return normalized
 
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos,
-                    robot1_target, robot2_target):
-        """根據當前策略選擇動作，結合兩種方法的穩定性處理"""
+                      robot1_target, robot2_target):
+        """根據當前策略選擇動作"""
         if len(frontiers) == 0:
             return 0, 0
 
@@ -105,74 +109,14 @@ class MultiRobotACTrainer:
 
         valid_frontiers = min(self.model.max_frontiers, len(frontiers))
         
-        # 從概率分布中採樣動作 - 整合兩種方法的安全處理
+        # 從概率分布中採樣動作
         robot1_probs = policy_dict['robot1_policy'][0, :valid_frontiers]
         robot2_probs = policy_dict['robot2_policy'][0, :valid_frontiers]
         
-        # 替換NaN、正無窮和負無窮值
-        robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers, posinf=1.0, neginf=0.0)
-        robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers, posinf=1.0, neginf=0.0)
-        
-        # 確保所有概率值都為正且有最小值
-        min_prob = 1e-10
-        robot1_probs = np.maximum(robot1_probs, min_prob)
-        robot2_probs = np.maximum(robot2_probs, min_prob)
-        
-        # 安全的歸一化處理
-        robot1_sum = np.sum(robot1_probs)
-        robot2_sum = np.sum(robot2_probs)
-        
-        # 檢測異常情況並使用均勻分布
-        if robot1_sum < 1e-8 or not np.isfinite(robot1_sum):
-            print("警告：Robot1概率總和異常，使用均勻分布")
-            robot1_probs = np.ones(valid_frontiers) / valid_frontiers
-        else:
-            robot1_probs = robot1_probs / robot1_sum
-            
-        if robot2_sum < 1e-8 or not np.isfinite(robot2_sum):
-            print("警告：Robot2概率總和異常，使用均勻分布")
-            robot2_probs = np.ones(valid_frontiers) / valid_frontiers
-        else:
-            robot2_probs = robot2_probs / robot2_sum
-        
-        # 添加小的擾動以確保概率分布多樣性
-        epsilon = 1e-5
-        robot1_probs = (1 - epsilon) * robot1_probs + epsilon / valid_frontiers
-        robot2_probs = (1 - epsilon) * robot2_probs + epsilon / valid_frontiers
-        
-        # 再次正規化
-        robot1_probs = robot1_probs / np.sum(robot1_probs)
-        robot2_probs = robot2_probs / np.sum(robot2_probs)
-        
-        # 最後確保沒有任何NaN和概率總和為1
-        robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
-        robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
-        
-        # 確保總和精確地為1
-        if abs(np.sum(robot1_probs) - 1.0) > 1e-10:
-            robot1_probs = robot1_probs / np.sum(robot1_probs)
-        if abs(np.sum(robot2_probs) - 1.0) > 1e-10:
-            robot2_probs = robot2_probs / np.sum(robot2_probs)
-        
-        # 安全選擇動作，備有備選方案
-        try:
-            robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-            robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
-        except ValueError as e:
-            # 詳細記錄問題
-            print(f"警告：選擇動作時出錯: {str(e)}")
-            print(f"Robot1概率: min={np.min(robot1_probs)}, max={np.max(robot1_probs)}, sum={np.sum(robot1_probs)}")
-            print(f"Robot2概率: min={np.min(robot2_probs)}, max={np.max(robot2_probs)}, sum={np.sum(robot2_probs)}")
-            
-            # 備選方案1：使用argmax（確定性選擇）
-            robot1_action = np.argmax(robot1_probs)
-            robot2_action = np.argmax(robot2_probs)
-            print(f"使用確定性選擇: robot1={robot1_action}, robot2={robot2_action}")
-        
+        robot1_action = np.random.choice(valid_frontiers, p=robot1_probs/np.sum(robot1_probs))
+        robot2_action = np.random.choice(valid_frontiers, p=robot2_probs/np.sum(robot2_probs))
+
         return robot1_action, robot2_action
-
-
-
 
     def compute_advantages(self, rewards, values, dones):
         # 不需要額外的next_value參數
@@ -350,7 +294,11 @@ class MultiRobotACTrainer:
                 robot2_total_reward = 0
                 steps = 0
                 
-                while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
+                # 初始化或重置地圖追蹤器
+                if self.map_tracker is not None:
+                    self.map_tracker.start_tracking()
+                
+                while not (self.robot1.check_done() or self.robot2.check_done()):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
@@ -396,6 +344,10 @@ class MultiRobotACTrainer:
                     self.robot1.other_robot_position = self.robot2.robot_position.copy()
                     self.robot2.other_robot_position = self.robot1.robot_position.copy()
                     
+                    # 更新地圖追蹤器
+                    if self.map_tracker is not None:
+                        self.map_tracker.update()
+                    
                     # 保存經驗到當前episode緩衝區
                     self.current_episode['states'].append(state)
                     self.current_episode['frontiers'].append(self.pad_frontiers(frontiers))
@@ -425,6 +377,15 @@ class MultiRobotACTrainer:
                             self.robot1.plot_env()
                         if self.robot2.plot:
                             self.robot2.plot_env()
+                
+                # 計算地圖重疊比例
+                overlap_ratio = 0.0
+                if self.map_tracker is not None:
+                    overlap_ratio = self.map_tracker.calculate_overlap()
+                    self.training_history['overlap_ratios'].append(float(overlap_ratio))
+                    
+                    # 每個訓練回合結束時保存當前地圖
+                    self.map_tracker.save_current_maps(episode)
                 
                 # Episode結束，進行訓練
                 actor_loss, critic_loss = self.train_on_episode()
@@ -458,6 +419,8 @@ class MultiRobotACTrainer:
                 print(f"Actor Loss: {float(actor_loss):.6f}")
                 print(f"Critic Loss: {float(critic_loss):.6f}")
                 print(f"Exploration Progress: {exploration_progress:.1%}")
+                # 列印地圖重疊比例
+                print(f"Map Overlap Ratio: {overlap_ratio:.2%}")
                 
                 if exploration_progress >= self.robot1.finish_percent:
                     print("Map Exploration Complete!")
@@ -510,6 +473,11 @@ class MultiRobotACTrainer:
             # 訓練結束後保存最終模型
             self.save_checkpoint(episodes)
             
+            # 訓練結束後生成覆蓋率圖表
+            if self.map_tracker is not None:
+                self.map_tracker.stop_tracking()
+                self.map_tracker.plot_coverage_over_time()
+            
         except Exception as e:
             print(f"Training Error: {str(e)}")
             import traceback
@@ -525,7 +493,10 @@ class MultiRobotACTrainer:
             
     def plot_training_progress(self):
         """繪製訓練進度圖"""
-        fig, axs = plt.subplots(7, 1, figsize=(12, 24))
+        # 決定圖形數量: 如果有重疊率數據, 則需要8個子圖
+        n_plots = 7 if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios'] else 6
+        
+        fig, axs = plt.subplots(n_plots, 1, figsize=(12, n_plots * 3.5))
         
         episodes = range(1, len(self.training_history['episode_rewards']) + 1)
         
@@ -575,6 +546,29 @@ class MultiRobotACTrainer:
         axs[5].set_ylabel('Completion Rate')
         axs[5].grid(True)
         
+        # 如果有重疊率數據，則繪製重疊率圖
+        if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios']:
+            # 確保數據長度與 episodes 一致
+            overlap_data = self.training_history['overlap_ratios']
+            if len(overlap_data) < len(episodes):
+                padded_data = overlap_data + [0.0] * (len(episodes) - len(overlap_data))
+                overlap_data = padded_data[:len(episodes)]
+            elif len(overlap_data) > len(episodes):
+                overlap_data = overlap_data[:len(episodes)]
+                
+            axs[6].plot(episodes, overlap_data, color='#8B008B')  # 使用深紫色
+            axs[6].set_title('Map Overlap Ratio')
+            axs[6].set_xlabel('Episode')
+            axs[6].set_ylabel('Overlap Ratio')
+            axs[6].grid(True)
+            axs[6].set_ylim(0, 1.0)
+        
+        # # 繪製探索進度
+        # if n_plots > 7:
+        #     axs[7].plot(episodes, self.training_history['exploration_progress'], color='#2F4F4F')
+        # else:
+        #     axs[6].plot(episodes, self.training_history['exploration_progress'], color='#2F4F4F')
+        
         plt.tight_layout()
         plt.savefig('training_progress.png')
         plt.close()
@@ -596,9 +590,29 @@ class MultiRobotACTrainer:
         plt.grid(True)
         plt.savefig('robots_rewards_comparison.png')
         plt.close()
+        
+        # 如果有重疊率數據，另外繪製一個單獨的重疊率圖
+        if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios']:
+            overlap_data = self.training_history['overlap_ratios']
+            if len(overlap_data) < len(episodes):
+                padded_data = overlap_data + [0.0] * (len(episodes) - len(overlap_data))
+                overlap_data = padded_data[:len(episodes)]
+            elif len(overlap_data) > len(episodes):
+                overlap_data = overlap_data[:len(episodes)]
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(episodes, overlap_data, color='#8B008B', linewidth=2)
+            plt.fill_between(episodes, overlap_data, alpha=0.3, color='#9370DB')
+            plt.title('Map Overlap Ratio Over Episodes')
+            plt.xlabel('Episode')
+            plt.ylabel('Overlap Ratio')
+            plt.ylim(0, 1.0)
+            plt.grid(True)
+            plt.savefig('map_overlap_ratio.png')
+            plt.close()
     
     def save_checkpoint(self, episode):
-        """保存檢查點 - 僅使用 .h5 格式
+        """保存檢查點
         
         Args:
             episode: 當前訓練輪數
@@ -629,6 +643,10 @@ class MultiRobotACTrainer:
             'critic_losses': [float(x) for x in self.training_history['critic_losses']],
             'exploration_progress': [float(x) for x in self.training_history['exploration_progress']]
         }
+        
+        # 添加重疊率數據（如果有）
+        if 'overlap_ratios' in self.training_history and self.training_history['overlap_ratios']:
+            history_to_save['overlap_ratios'] = [float(x) for x in self.training_history['overlap_ratios']]
         
         try:
             with open(history_path, 'w') as f:
