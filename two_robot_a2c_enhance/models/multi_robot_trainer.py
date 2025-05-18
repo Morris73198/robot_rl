@@ -87,93 +87,94 @@ class MultiRobotACTrainer:
         return normalized
 
     def choose_actions(self, state, frontiers, robot1_pos, robot2_pos,
-                    robot1_target, robot2_target):
-        """根據當前策略選擇動作，結合兩種方法的穩定性處理"""
-        if len(frontiers) == 0:
-            return 0, 0
+                        robot1_target, robot2_target):
+            """根據當前策略選擇動作，處理異常概率但不使用均勻分布"""
+            if len(frontiers) == 0:
+                return 0, 0
 
-        # 準備輸入數據
-        state_batch = np.expand_dims(state, 0)
-        frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0)
-        robot1_pos_batch = np.expand_dims(robot1_pos, 0)
-        robot2_pos_batch = np.expand_dims(robot2_pos, 0)
-        robot1_target_batch = np.expand_dims(robot1_target, 0)
-        robot2_target_batch = np.expand_dims(robot2_target, 0)
+            # 準備輸入數據
+            state_batch = np.expand_dims(state, 0)
+            frontiers_batch = np.expand_dims(self.pad_frontiers(frontiers), 0)
+            robot1_pos_batch = np.expand_dims(robot1_pos, 0)
+            robot2_pos_batch = np.expand_dims(robot2_pos, 0)
+            robot1_target_batch = np.expand_dims(robot1_target, 0)
+            robot2_target_batch = np.expand_dims(robot2_target, 0)
 
-        # 獲取動作概率分布
-        policy_dict = self.model.predict_policy(
-            state_batch, frontiers_batch,
-            robot1_pos_batch, robot2_pos_batch,
-            robot1_target_batch, robot2_target_batch
-        )
+            # 獲取動作概率分布
+            policy_dict = self.model.predict_policy(
+                state_batch, frontiers_batch,
+                robot1_pos_batch, robot2_pos_batch,
+                robot1_target_batch, robot2_target_batch
+            )
 
-        valid_frontiers = min(self.model.max_frontiers, len(frontiers))
-        
-        # 從概率分布中採樣動作 - 整合兩種方法的安全處理
-        robot1_probs = policy_dict['robot1_policy'][0, :valid_frontiers]
-        robot2_probs = policy_dict['robot2_policy'][0, :valid_frontiers]
-        
-        # 替換NaN、正無窮和負無窮值
-        robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers, posinf=1.0, neginf=0.0)
-        robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers, posinf=1.0, neginf=0.0)
-        
-        # 確保所有概率值都為正且有最小值
-        min_prob = 1e-10
-        robot1_probs = np.maximum(robot1_probs, min_prob)
-        robot2_probs = np.maximum(robot2_probs, min_prob)
-        
-        # 安全的歸一化處理
-        robot1_sum = np.sum(robot1_probs)
-        robot2_sum = np.sum(robot2_probs)
-        
-        # 檢測異常情況並使用均勻分布
-        if robot1_sum < 1e-8 or not np.isfinite(robot1_sum):
-            print("警告：Robot1概率總和異常，使用均勻分布")
-            robot1_probs = np.ones(valid_frontiers) / valid_frontiers
-        else:
-            robot1_probs = robot1_probs / robot1_sum
+            valid_frontiers = min(self.model.max_frontiers, len(frontiers))
             
-        if robot2_sum < 1e-8 or not np.isfinite(robot2_sum):
-            print("警告：Robot2概率總和異常，使用均勻分布")
-            robot2_probs = np.ones(valid_frontiers) / valid_frontiers
-        else:
-            robot2_probs = robot2_probs / robot2_sum
-        
-        # 添加小的擾動以確保概率分布多樣性
-        epsilon = 1e-5
-        robot1_probs = (1 - epsilon) * robot1_probs + epsilon / valid_frontiers
-        robot2_probs = (1 - epsilon) * robot2_probs + epsilon / valid_frontiers
-        
-        # 再次正規化
-        robot1_probs = robot1_probs / np.sum(robot1_probs)
-        robot2_probs = robot2_probs / np.sum(robot2_probs)
-        
-        # 最後確保沒有任何NaN和概率總和為1
-        robot1_probs = np.nan_to_num(robot1_probs, nan=1.0/valid_frontiers)
-        robot2_probs = np.nan_to_num(robot2_probs, nan=1.0/valid_frontiers)
-        
-        # 確保總和精確地為1
-        if abs(np.sum(robot1_probs) - 1.0) > 1e-10:
-            robot1_probs = robot1_probs / np.sum(robot1_probs)
-        if abs(np.sum(robot2_probs) - 1.0) > 1e-10:
-            robot2_probs = robot2_probs / np.sum(robot2_probs)
-        
-        # 安全選擇動作，備有備選方案
-        try:
-            robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
-            robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
-        except ValueError as e:
-            # 詳細記錄問題
-            print(f"警告：選擇動作時出錯: {str(e)}")
-            print(f"Robot1概率: min={np.min(robot1_probs)}, max={np.max(robot1_probs)}, sum={np.sum(robot1_probs)}")
-            print(f"Robot2概率: min={np.min(robot2_probs)}, max={np.max(robot2_probs)}, sum={np.sum(robot2_probs)}")
+            # 從概率分布中採樣動作 - 直接處理異常值
+            robot1_probs = policy_dict['robot1_policy'][0, :valid_frontiers]
+            robot2_probs = policy_dict['robot2_policy'][0, :valid_frontiers]
             
-            # 備選方案1：使用argmax（確定性選擇）
-            robot1_action = np.argmax(robot1_probs)
-            robot2_action = np.argmax(robot2_probs)
-            print(f"使用確定性選擇: robot1={robot1_action}, robot2={robot2_action}")
-        
-        return robot1_action, robot2_action
+            # 將 NaN 和無窮大值設為 0，而不是使用均勻分布
+            robot1_invalid_mask = ~np.isfinite(robot1_probs) | (robot1_probs < 0)
+            if np.any(robot1_invalid_mask):
+                print(f"警告：Robot1存在 {np.sum(robot1_invalid_mask)} 個異常概率值，已設為 0")
+                robot1_probs[robot1_invalid_mask] = 0.0
+            
+            robot2_invalid_mask = ~np.isfinite(robot2_probs) | (robot2_probs < 0)
+            if np.any(robot2_invalid_mask):
+                print(f"警告：Robot2存在 {np.sum(robot2_invalid_mask)} 個異常概率值，已設為 0")
+                robot2_probs[robot2_invalid_mask] = 0.0
+            
+            # 檢查處理後的總和，如果還是無效（如全為 0），則使用備用策略
+            robot1_sum = np.sum(robot1_probs)
+            if robot1_sum <= 1e-10:
+                print("警告：Robot1概率總和異常，使用加權距離策略")
+                # 使用基於距離的加權而非均勻分布
+                distances = np.linalg.norm(frontiers[:valid_frontiers] - robot1_pos.reshape(1, 2), axis=1)
+                # 將距離轉換為權重（距離越近，權重越大）
+                weights = 1.0 / (distances + 1e-6)  # 避免除零
+                robot1_probs = weights / np.sum(weights)
+            else:
+                # 正規化概率
+                robot1_probs = robot1_probs / robot1_sum
+            
+            robot2_sum = np.sum(robot2_probs)
+            if robot2_sum <= 1e-10:
+                print("警告：Robot2概率總和異常，使用加權距離策略")
+                # 使用基於距離的加權而非均勻分布
+                distances = np.linalg.norm(frontiers[:valid_frontiers] - robot2_pos.reshape(1, 2), axis=1)
+                # 將距離轉換為權重（距離越近，權重越大）
+                weights = 1.0 / (distances + 1e-6)  # 避免除零
+                robot2_probs = weights / np.sum(weights)
+            else:
+                # 正規化概率
+                robot2_probs = robot2_probs / robot2_sum
+            
+            # 確保最終概率分布合法
+            assert np.all(np.isfinite(robot1_probs)), "Robot1 最終概率分布仍有無效值"
+            assert np.all(np.isfinite(robot2_probs)), "Robot2 最終概率分布仍有無效值"
+            assert abs(np.sum(robot1_probs) - 1.0) < 1e-6, f"Robot1 概率總和 {np.sum(robot1_probs)} 應為 1.0"
+            assert abs(np.sum(robot2_probs) - 1.0) < 1e-6, f"Robot2 概率總和 {np.sum(robot2_probs)} 應為 1.0"
+            
+            # 安全地選擇動作
+            try:
+                robot1_action = np.random.choice(valid_frontiers, p=robot1_probs)
+                robot2_action = np.random.choice(valid_frontiers, p=robot2_probs)
+            except ValueError as e:
+                # 若仍出錯，提供詳細信息並使用備用方案
+                print(f"警告：選擇動作時出錯: {str(e)}")
+                print(f"Robot1概率: min={np.min(robot1_probs)}, max={np.max(robot1_probs)}, sum={np.sum(robot1_probs)}")
+                print(f"Robot2概率: min={np.min(robot2_probs)}, max={np.max(robot2_probs)}, sum={np.sum(robot2_probs)}")
+                
+                # 備用方案：使用 argmax（確定性選擇）
+                if valid_frontiers > 0:
+                    robot1_action = np.argmax(robot1_probs) if np.max(robot1_probs) > 0 else 0
+                    robot2_action = np.argmax(robot2_probs) if np.max(robot2_probs) > 0 else 0
+                    print(f"使用確定性選擇: robot1={robot1_action}, robot2={robot2_action}")
+                else:
+                    robot1_action = 0
+                    robot2_action = 0
+            
+            return robot1_action, robot2_action
 
     def compute_advantages(self, rewards, values, dones):
         # 不需要額外的next_value參數
@@ -355,7 +356,7 @@ class MultiRobotACTrainer:
                 if self.map_tracker is not None:
                     self.map_tracker.start_tracking()
                 
-                while not (self.robot1.check_done() or self.robot2.check_done()):
+                while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
