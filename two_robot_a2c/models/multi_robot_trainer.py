@@ -356,7 +356,7 @@ class MultiRobotACTrainer:
                 if self.map_tracker is not None:
                     self.map_tracker.start_tracking()
                 
-                while not (self.robot1.check_done() or self.robot2.check_done()):
+                while not (self.robot1.check_done() or self.robot2.check_done() or steps >= 1500):
                     frontiers = self.robot1.get_frontiers()
                     if len(frontiers) == 0:
                         break
