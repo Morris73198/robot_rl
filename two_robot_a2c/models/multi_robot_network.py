@@ -221,8 +221,8 @@ class MultiRobotACModel:
         print("========================\n")
         
     def _build_perception_module(self, inputs):
-        """構建感知模塊，對應圖中的Perception部分"""
-        # 首先降低輸入分辨率
+        """構建共享的感知模塊"""
+        # 降低輸入分辨率
         x = layers.AveragePooling2D(pool_size=(2, 2))(inputs)
         
         # 使用不同大小的卷積核進行特征提取
@@ -243,80 +243,58 @@ class MultiRobotACModel:
             )(x)
             branch = layers.BatchNormalization()(branch)
             branch = layers.Activation('relu')(branch)
-            # 添加空間注意力
             branch = SpatialAttention()(branch)
             features.append(branch)
             
         # 合併特征
         x = layers.Add()(features)
-        # 1x1卷積融合特征
         x = layers.Conv2D(64, 1, padding='same')(x)
         x = layers.BatchNormalization()(x)
         x = layers.Activation('relu')(x)
-        # 全局平均池化得到特征向量
         x = layers.GlobalAveragePooling2D()(x)
         
         return x
         
-    def _build_frontier_module(self, frontier_input):
-        """構建frontier處理模塊，對應圖中的Frontier attention layer部分"""
-        # 處理 frontier 特征，得到64維特征
+    def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
+        """構建共享特征提取層"""
+        # 處理 frontier 特征
         frontier_features = layers.Dense(64, activation='relu')(frontier_input)
         frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
         
         # 添加位置編碼
         pos_encoding = PositionalEncoding(self.max_frontiers, 64)(frontier_features)
         
-        # 對 frontier 序列使用自注意力機制
+        # 對 frontier 序列使用多頭注意力
         attention_output = MultiHeadAttention(
             d_model=64,
             num_heads=4,
             dropout_rate=self.dropout_rate
         )([pos_encoding, pos_encoding, pos_encoding])
         
-        # 殘差連接
         frontier_features = layers.Add()([frontier_features, attention_output])
-        
-        # 前向網絡處理
         frontier_features = FeedForward(64, 128)(frontier_features)
         
-        return frontier_features
-    
-    def _build_robot_state_module(self, robot1_state, robot2_state):
-        """構建機器人狀態處理模塊，對應圖中的State process部分"""
-        # 處理機器人1狀態
-        robot1_features = layers.Dense(32, activation='relu')(robot1_state)
-        
-        # 處理機器人2狀態
-        robot2_features = layers.Dense(32, activation='relu')(robot2_state)
-        
-        # 合併兩個機器人的特征
-        robot_features = layers.Concatenate()([robot1_features, robot2_features])
-        
-        return robot_features
-        
-    def _build_shared_features(self, map_features, frontier_features, robot_features):
-        """構建共享特征層，對應圖中的Process部分"""
-        # 處理frontier全局特征
-        frontier_global = layers.GlobalAveragePooling1D()(frontier_features)
+        # 處理機器人狀態
+        robot_features = layers.Concatenate()([
+            layers.Dense(32, activation='relu')(robot1_state),
+            layers.Dense(32, activation='relu')(robot2_state)
+        ])
         
         # 合併所有特征
         combined_features = layers.Concatenate()([
             map_features,
-            frontier_global,
+            layers.GlobalAveragePooling1D()(frontier_features),
             robot_features
         ])
         
-        # 構建共享特征網絡
         x = layers.Dense(256, activation='relu')(combined_features)
         x = layers.Dropout(self.dropout_rate)(x)
         x = layers.Dense(128, activation='relu')(x)
-        x = layers.Dropout(self.dropout_rate)(x)
         
         return x
         
     def _build_policy_head(self, features, name_prefix):
-        """構建策略輸出頭，對應圖中的Robot policy部分"""
+        """構建策略輸出頭"""
         x = layers.Dense(128, activation='relu')(features)
         x = layers.Dropout(self.dropout_rate)(x)
         x = layers.Dense(64, activation='relu')(x)
@@ -329,7 +307,7 @@ class MultiRobotACModel:
         return policy
 
     def _build_value_head(self, features, name_prefix):
-        """構建價值輸出頭，對應圖中的Robot value部分"""
+        """構建價值輸出頭"""
         x = layers.Dense(128, activation='relu')(features)
         x = layers.Dropout(self.dropout_rate)(x)
         x = layers.Dense(64, activation='relu')(x)
@@ -347,29 +325,25 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 構建感知模塊
+        # 特征提取
         map_features = self._build_perception_module(map_input)
         
-        # 構建frontier處理模塊
-        frontier_features = self._build_frontier_module(frontier_input)
-        
-        # 構建機器人狀態處理
+        # 機器人狀態編碼
         robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
         robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
-        robot_features = self._build_robot_state_module(robot1_state, robot2_state)
         
-        # 構建共享特征層
+        # 共享特征提取
         shared_features = self._build_shared_features(
             map_features, 
-            frontier_features, 
-            robot_features
+            frontier_input, 
+            robot1_state, 
+            robot2_state
         )
         
-        # 構建策略輸出頭
+        # 輸出層
         robot1_policy = self._build_policy_head(shared_features, 'robot1_policy')
         robot2_policy = self._build_policy_head(shared_features, 'robot2_policy')
         
-        # 創建模型
         model = models.Model(
             inputs={
                 'map_input': map_input,
@@ -385,7 +359,6 @@ class MultiRobotACModel:
             }
         )
         
-        # 設置優化器
         optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
         model.compile(optimizer=optimizer)
         
@@ -393,7 +366,6 @@ class MultiRobotACModel:
         
     def _build_critic(self):
         """構建 Critic 網絡"""
-        # 與Actor共享相同的輸入層
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
         robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
@@ -401,25 +373,25 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 重用相同的特征提取模塊
+        # 特征提取
         map_features = self._build_perception_module(map_input)
-        frontier_features = self._build_frontier_module(frontier_input)
         
+        # 機器人狀態編碼
         robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
         robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
-        robot_features = self._build_robot_state_module(robot1_state, robot2_state)
         
+        # 共享特征提取
         shared_features = self._build_shared_features(
             map_features, 
-            frontier_features, 
-            robot_features
+            frontier_input, 
+            robot1_state, 
+            robot2_state
         )
         
-        # 構建價值輸出頭
+        # 輸出層
         robot1_value = self._build_value_head(shared_features, 'robot1_value')
         robot2_value = self._build_value_head(shared_features, 'robot2_value')
         
-        # 創建模型
         model = models.Model(
             inputs={
                 'map_input': map_input,
@@ -435,7 +407,6 @@ class MultiRobotACModel:
             }
         )
         
-        # 設置優化器
         optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
         model.compile(optimizer=optimizer, loss='mse')
         
@@ -468,6 +439,7 @@ class MultiRobotACModel:
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
                 robot1_target, robot2_target, actions, advantages):
         with tf.GradientTape() as tape:
+            # 直接使用self.actor而不是self.model.actor
             policy_dict = self.actor({
                 'map_input': states,
                 'frontier_input': frontiers,
@@ -501,6 +473,7 @@ class MultiRobotACModel:
     def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target, returns):
         with tf.GradientTape() as tape:
+            # 直接使用self.critic而不是self.model.critic
             values = self.critic({
                 'map_input': states,
                 'frontier_input': frontiers,
