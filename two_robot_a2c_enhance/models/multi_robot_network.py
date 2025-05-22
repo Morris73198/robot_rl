@@ -384,13 +384,13 @@ class FeedForward(layers.Layer):
         return config
 
 class MultiRobotACModel:
-    """多機器人 Actor-Critic 模型 - 記憶體優化版"""
+    """多機器人 Actor-Critic 模型 - 簡化版（參考 network2 的架構）"""
     def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
         self.input_shape = input_shape
         self.max_frontiers = max_frontiers
-        self.d_model = 256  # 模型維度
-        self.num_heads = 8  # 注意力頭數
-        self.dff = 512  # 前饋網絡維度
+        self.d_model = 128  # 參考 network2
+        self.num_heads = 4  # 參考 network2
+        self.dff = 256  # 參考 network2
         self.dropout_rate = 0.1
         
         # 創建 Actor 和 Critic 網絡
@@ -413,164 +413,8 @@ class MultiRobotACModel:
         print(f"預期權重檔案大小: {total_params * 4 / (1024*1024):.2f} MB")
         print("========================\n")
         
-    def _build_perception_module(self, inputs):
-        """構建共享的感知模塊 - 記憶體優化版"""
-        # 降低輸入分辨率
-        x = layers.AveragePooling2D(pool_size=(2, 2))(inputs)
-        
-        # 使用不同大小的卷積核進行特征提取，但減少特徵數量
-        conv_configs = [
-            {'filters': 32, 'kernel_size': 3, 'strides': 2},  # 從32減半到16
-            {'filters': 32, 'kernel_size': 5, 'strides': 2},
-            {'filters': 32, 'kernel_size': 7, 'strides': 2}
-        ]
-        
-        features = []
-        for config in conv_configs:
-            branch = layers.Conv2D(
-                filters=config['filters'],
-                kernel_size=config['kernel_size'],
-                strides=config['strides'],
-                padding='same',
-                kernel_regularizer=regularizers.l2(0.01)
-            )(x)
-            branch = layers.BatchNormalization()(branch)
-            branch = layers.Activation('relu')(branch)
-            # 使用優化版的空間注意力
-            branch = EnhancedSpatialAttention()(branch)
-            features.append(branch)
-            
-        # 合併特征
-        x = layers.Add()(features)
-        x = layers.Conv2D(64, 1, padding='same')(x)  # 從64減半到32
-        x = layers.BatchNormalization()(x)
-        x = layers.Activation('relu')(x)
-        x = layers.GlobalAveragePooling2D()(x)
-        
-        return x
-        
-    def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
-        """構建記憶體優化版的共享特徵提取層"""
-        # 減少中間層大小，從64降到32
-        reduced_dim = 64
-        
-        # 處理 frontier 特征，減少中間特徵維度
-        frontier_features = layers.Dense(reduced_dim, activation='relu')(frontier_input)
-        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
-        
-        # 使用更簡單的位置編碼
-        # 添加簡化的位置編碼（線性位置編碼代替複雜的正弦/餘弦編碼）
-        pos_indices = tf.range(start=0, limit=tf.shape(frontier_features)[1], delta=1)
-        pos_indices = tf.cast(pos_indices, tf.float32)
-        pos_indices = tf.expand_dims(pos_indices, axis=-1)
-        pos_indices = tf.tile(pos_indices, [1, reduced_dim])
-        pos_indices = pos_indices / tf.cast(self.max_frontiers, tf.float32)
-        
-        # 擴展位置編碼到批次維度
-        batch_size = tf.shape(frontier_features)[0]
-        pos_encoding = tf.expand_dims(pos_indices, axis=0)
-        pos_encoding = tf.tile(pos_encoding, [batch_size, 1, 1])
-        
-        # 添加位置編碼到特徵 (加法代替複雜的位置編碼層)
-        frontier_features_with_pos = frontier_features + 0.1 * pos_encoding
-        
-        # 使用標準的Self-Attention而非自定義的多頭注意力
-        # 先將特徵尺寸調整為注意力機制要求的形狀
-        attention_output = layers.MultiHeadAttention(
-            num_heads=2,  # 減少頭數
-            key_dim=reduced_dim // 2,  # 減少每個頭的維度
-            dropout=self.dropout_rate
-        )(frontier_features_with_pos, frontier_features_with_pos)
-        
-        # 添加殘差連接和層正規化
-        frontier_features = layers.LayerNormalization()(frontier_features_with_pos + attention_output)
-        
-        # 使用一個簡單的前饋網路代替FeedForward類
-        frontier_features = layers.Dense(reduced_dim * 2, activation='relu')(frontier_features)
-        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
-        frontier_features = layers.Dense(reduced_dim)(frontier_features)
-        frontier_features = layers.LayerNormalization()(frontier_features_with_pos + frontier_features)
-        
-        # 處理機器人狀態，減少特徵維度
-        robot1_feat = layers.Dense(reduced_dim // 2, activation='relu')(robot1_state)
-        robot2_feat = layers.Dense(reduced_dim // 2, activation='relu')(robot2_state)
-        
-        # 添加優化版的跨機器人注意力
-        robot1_enhanced, robot2_enhanced = CrossRobotAttention(
-            d_model=reduced_dim // 2, 
-            num_heads=4  # 減少頭數
-        )([robot1_feat, robot2_feat])
-        
-        # 融合機器人特徵
-        robot_features = layers.Concatenate()([robot1_enhanced, robot2_enhanced])
-        
-        # 處理時間維度特徵，全局平均池化減少參數量
-        temporal_frontier_feature = layers.GlobalAveragePooling1D()(frontier_features)
-        
-        # 使用較小的特徵維度
-        temporal_frontier_feature = layers.Dense(reduced_dim, activation='relu')(temporal_frontier_feature)
-        
-        # 添加優化版的時間注意力
-        temporal_features = TemporalAttention(
-            d_model=reduced_dim,
-            memory_length=20,  # 減少記憶長度
-            num_heads=4  # 減少頭數
-        )(temporal_frontier_feature)
-        
-        # 使用較小的特徵維度
-        map_features_reduced = layers.Dense(reduced_dim, activation='relu')(map_features)
-        frontier_global = layers.GlobalAveragePooling1D()(frontier_features)
-        frontier_global = layers.Dense(reduced_dim, activation='relu')(frontier_global)
-        robot_features_reduced = layers.Dense(reduced_dim, activation='relu')(robot_features)
-        
-        # 使用優化版的自適應注意力融合
-        fused_features = AdaptiveAttentionFusion(
-            d_model=reduced_dim
-        )([
-            map_features_reduced,
-            frontier_global,
-            robot_features_reduced,
-            temporal_features
-        ])
-        
-        # 使用較小的隱藏層尺寸
-        combined_features = layers.Concatenate()([
-            map_features_reduced,
-            fused_features,
-            robot_features_reduced
-        ])
-        
-        # 最終特徵處理，減少隱藏層大小
-        x = layers.Dense(128, activation='relu')(combined_features)
-        x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(64, activation='relu')(x)
-        
-        return x
-        
-    def _build_policy_head(self, features, name_prefix):
-        """構建策略輸出頭"""
-        x = layers.Dense(128, activation='relu')(features)  # 從128減少到64
-        x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(64, activation='relu')(x)  # 從64減少到32
-        x = layers.Dropout(self.dropout_rate)(x)
-        policy = layers.Dense(
-            self.max_frontiers,
-            activation='softmax',
-            name=name_prefix
-        )(x)
-        return policy
-
-    def _build_value_head(self, features, name_prefix):
-        """構建價值輸出頭"""
-        x = layers.Dense(128, activation='relu')(features)  # 從128減少到64
-        x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(64, activation='relu')(x)  # 從64減少到32
-        x = layers.Dropout(self.dropout_rate)(x)
-        value = layers.Dense(1, name=name_prefix)(x)
-        return value
-        
     def _build_actor(self):
-        """構建 Actor 網絡 - 確保有足夠的參數"""
+        """構建 Actor 網絡 - 完全參考 network2 的簡化架構"""
         # 輸入層
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
@@ -579,7 +423,7 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 處理地圖輸入 - CNN網絡
+        # 處理地圖輸入 - 完全參考 network2 的簡單 CNN
         x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(map_input)
         x = layers.BatchNormalization()(x)
         x = layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')(x)
@@ -589,13 +433,13 @@ class MultiRobotACModel:
         map_features = layers.Flatten()(x)
         map_features = layers.Dense(256, activation='relu')(map_features)
         
-        # 處理前沿點
+        # 處理前沿點 - 參考 network2
         f = layers.Dense(64, activation='relu')(frontier_input)
         f = layers.TimeDistributed(layers.Dense(32, activation='relu'))(f)
         f = layers.GlobalAveragePooling1D()(f)
         frontiers_features = layers.Dense(128, activation='relu')(f)
         
-        # 處理機器人狀態
+        # 處理機器人狀態 - 參考 network2
         robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
         robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
         robot1_feat = layers.Dense(64, activation='relu')(robot1_state)
@@ -603,7 +447,7 @@ class MultiRobotACModel:
         robot_features = layers.Concatenate()([robot1_feat, robot2_feat])
         robot_features = layers.Dense(128, activation='relu')(robot_features)
         
-        # 合併所有特徵
+        # 合併所有特徵 - 參考 network2 的直接連接
         combined = layers.Concatenate()([map_features, frontiers_features, robot_features])
         combined = layers.Dense(512, activation='relu')(combined)
         combined = layers.Dropout(0.1)(combined)
@@ -611,7 +455,7 @@ class MultiRobotACModel:
         combined = layers.Dropout(0.1)(combined)
         combined = layers.Dense(128, activation='relu')(combined)
         
-        # 將輸出分成兩支路，增強機器人獨立性
+        # 分成兩支路 - 參考 network2
         robot1_branch = layers.Dense(128, activation='relu')(combined)
         robot2_branch = layers.Dense(128, activation='relu')(combined)
         
@@ -641,7 +485,7 @@ class MultiRobotACModel:
         return model
         
     def _build_critic(self):
-        """構建 Critic 網絡 - 確保有足夠的參數"""
+        """構建 Critic 網絡 - 完全參考 network2 的簡化架構"""
         # 輸入層 - 與Actor共享
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
@@ -650,7 +494,7 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 處理地圖輸入 - CNN網絡
+        # 處理地圖輸入 - 完全參考 network2 的簡單 CNN
         x = layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')(map_input)
         x = layers.BatchNormalization()(x)
         x = layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')(x)
@@ -660,13 +504,13 @@ class MultiRobotACModel:
         map_features = layers.Flatten()(x)
         map_features = layers.Dense(256, activation='relu')(map_features)
         
-        # 處理前沿點
+        # 處理前沿點 - 參考 network2
         f = layers.Dense(64, activation='relu')(frontier_input)
         f = layers.TimeDistributed(layers.Dense(32, activation='relu'))(f)
         f = layers.GlobalAveragePooling1D()(f)
         frontiers_features = layers.Dense(128, activation='relu')(f)
         
-        # 處理機器人狀態
+        # 處理機器人狀態 - 參考 network2
         robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
         robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
         robot1_feat = layers.Dense(64, activation='relu')(robot1_state)
@@ -674,7 +518,7 @@ class MultiRobotACModel:
         robot_features = layers.Concatenate()([robot1_feat, robot2_feat])
         robot_features = layers.Dense(128, activation='relu')(robot_features)
         
-        # 合併所有特徵
+        # 合併所有特徵 - 參考 network2 的直接連接
         combined = layers.Concatenate()([map_features, frontiers_features, robot_features])
         combined = layers.Dense(512, activation='relu')(combined)
         combined = layers.Dropout(0.1)(combined)
@@ -682,7 +526,7 @@ class MultiRobotACModel:
         combined = layers.Dropout(0.1)(combined)
         combined = layers.Dense(128, activation='relu')(combined)
         
-        # 將輸出分成兩支路，增強機器人獨立性
+        # 分成兩支路 - 參考 network2
         robot1_branch = layers.Dense(128, activation='relu')(combined)
         robot2_branch = layers.Dense(128, activation='relu')(combined)
         
@@ -735,8 +579,6 @@ class MultiRobotACModel:
             'robot1_target_input': robot1_target,
             'robot2_target_input': robot2_target
         }, verbose=0)
-    
-   
     
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
                 robot1_target, robot2_target, actions, advantages):
