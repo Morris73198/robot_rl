@@ -9,8 +9,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import spatial
 import csv
-import time
-import datetime
 from two_robot_a2c.models.multi_robot_network import MultiRobotACModel
 from two_robot_a2c.environment.multi_robot_no_unknown import Robot
 from two_robot_a2c.config import ROBOT_CONFIG, MODEL_DIR
@@ -169,14 +167,7 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
     # 創建CSV檔案來記錄每個步驟的覆蓋率數據
     csv_path = os.path.join(output_dir, 'coverage_data.csv')
     with open(csv_path, 'w', newline='') as csvfile:
-        fieldnames = ['StartPoint', 'Step', 'ElapsedTime', 'Robot1Coverage', 'Robot2Coverage', 'IntersectionCoverage', 'UnionCoverage']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-    
-    # 創建完成時間記錄CSV
-    completion_csv_path = os.path.join(output_dir, 'completion_times.csv')
-    with open(completion_csv_path, 'w', newline='') as csvfile:
-        fieldnames = ['StartPoint', 'Robot1Start', 'Robot2Start', 'TotalSteps', 'CompletionTime_seconds', 'CompletionTime_formatted', 'FinalCoverage', 'ExplorationComplete']
+        fieldnames = ['StartPoint', 'Step', 'Robot1Coverage', 'Robot2Coverage', 'IntersectionCoverage', 'UnionCoverage']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
     
@@ -203,11 +194,6 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
         print(f"\n===== 測試起始點 {start_idx+1}/{len(start_points_list)} =====")
         print(f"機器人1起始位置: {robot1_pos}")
         print(f"機器人2起始位置: {robot2_pos}")
-        
-        # 記錄開始時間
-        start_time = time.time()
-        start_datetime = datetime.datetime.now()
-        print(f"開始時間: {start_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         
         # 創建當前起始點的輸出目錄
         current_output_dir = os.path.join(output_dir, f'start_point_{start_idx+1}')
@@ -253,14 +239,11 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
             
             steps = 0
             intersection_data = []
-            max_steps = 1500  # 設置最大步數
-            exploration_complete = False
+            max_steps = 15000000  # 設置最大步數
             
             while not (robot1.check_done() or robot2.check_done()) and steps < max_steps:
                 frontiers = robot1.get_frontiers()
                 if len(frontiers) == 0:
-                    print("沒有更多 frontiers，探索完成")
-                    exploration_complete = True
                     break
                 
                 # 獲取當前位置並規範化
@@ -338,10 +321,6 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
                 # 更新個人地圖追蹤器
                 tracker.update()
                 
-                # 計算當前經過的時間
-                current_time = time.time()
-                elapsed_time = current_time - start_time
-                
                 # 計算並記錄覆蓋率數據
                 robot1_map = tracker.robot1_individual_map
                 robot2_map = tracker.robot2_individual_map
@@ -369,35 +348,26 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
                     # 記錄數據
                     intersection_data.append({
                         'step': steps,
-                        'elapsed_time': elapsed_time,
                         'robot1_coverage': robot1_coverage,
                         'robot2_coverage': robot2_coverage,
                         'intersection_coverage': intersection_coverage,
                         'union_coverage': union_coverage
                     })
                     
-                    # 寫入CSV（包含時間信息）
+                    # 寫入CSV
                     with open(csv_path, 'a', newline='') as csvfile:
-                        writer = csv.DictWriter(csvfile, fieldnames=['StartPoint', 'Step', 'ElapsedTime', 'Robot1Coverage', 'Robot2Coverage', 'IntersectionCoverage', 'UnionCoverage'])
+                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                         writer.writerow({
                             'StartPoint': start_idx+1,
                             'Step': steps,
-                            'ElapsedTime': f"{elapsed_time:.3f}",
-                            'Robot1Coverage': f"{robot1_coverage:.6f}",
-                            'Robot2Coverage': f"{robot2_coverage:.6f}",
-                            'IntersectionCoverage': f"{intersection_coverage:.6f}",
-                            'UnionCoverage': f"{union_coverage:.6f}"
+                            'Robot1Coverage': robot1_coverage,
+                            'Robot2Coverage': robot2_coverage,
+                            'IntersectionCoverage': intersection_coverage,
+                            'UnionCoverage': union_coverage
                         })
                 
                 state = next_state1
                 steps += 1
-                
-                # 檢查探索完成條件
-                exploration_progress = robot1.get_exploration_progress()
-                if exploration_progress >= robot1.finish_percent:
-                    print(f"探索達到目標完成率 {robot1.finish_percent:.1%}")
-                    exploration_complete = True
-                    break
                 
                 # 每 10 步儲存繪圖和個人地圖
                 if steps % 10 == 0:
@@ -409,60 +379,18 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
                     
                     # 每50步打印一次進度
                     if steps % 50 == 0:
-                        print(f"步數: {steps}, 時間: {elapsed_time:.2f}s, 探索進度: {exploration_progress:.1%}")
+                        exploration_progress = robot1.get_exploration_progress()
+                        print(f"步數: {steps}, 探索進度: {exploration_progress:.1%}")
             
-            # 記錄結束時間
-            end_time = time.time()
-            end_datetime = datetime.datetime.now()
-            total_completion_time = end_time - start_time
-            
-            print(f"結束時間: {end_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-            print(f"總完成時間: {total_completion_time:.3f} 秒")
-            
-            # 計算最終覆蓋率
-            final_coverage = robot1.get_exploration_progress()
-            
-            # 儲存完成時間記錄
-            with open(completion_csv_path, 'a', newline='') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=['StartPoint', 'Robot1Start', 'Robot2Start', 'TotalSteps', 'CompletionTime_seconds', 'CompletionTime_formatted', 'FinalCoverage', 'ExplorationComplete'])
-                
-                # 格式化完成時間
-                hours = int(total_completion_time // 3600)
-                minutes = int((total_completion_time % 3600) // 60)
-                seconds = total_completion_time % 60
-                time_formatted = f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
-                
-                writer.writerow({
-                    'StartPoint': start_idx+1,
-                    'Robot1Start': f"[{robot1_pos[0]}, {robot1_pos[1]}]",
-                    'Robot2Start': f"[{robot2_pos[0]}, {robot2_pos[1]}]",
-                    'TotalSteps': steps,
-                    'CompletionTime_seconds': f"{total_completion_time:.3f}",
-                    'CompletionTime_formatted': time_formatted,
-                    'FinalCoverage': f"{final_coverage:.6f}",
-                    'ExplorationComplete': exploration_complete
-                })
-            
-            # === 重要：儲存最後一個時刻的圖片 ===
-            # 檢查是否需要儲存最後一步的圖片（如果最後一步不是10的倍數）
-            if steps % 10 != 0:
-                print(f"儲存最後一步圖片: step {steps}")
-                save_plot(robot1, steps, os.path.join(current_output_dir, f'robot1_step_{steps:04d}.png'))
-                save_plot(robot2, steps, os.path.join(current_output_dir, f'robot2_step_{steps:04d}.png'))
-                
-                # 儲存最後一步的個人地圖
-                tracker.save_current_maps(steps)
-            
-            # 儲存最終狀態圖片（使用 "final" 標記）
+            # 儲存最終狀態
             save_plot(robot1, steps, os.path.join(current_output_dir, f'robot1_final_step_{steps:04d}.png'))
             save_plot(robot2, steps, os.path.join(current_output_dir, f'robot2_final_step_{steps:04d}.png'))
             
             # 儲存最終個人地圖
             tracker.save_current_maps(steps)
             
-            # 生成覆蓋率圖表（包含時間軸）
+            # 生成每個起始點的覆蓋率時間變化圖表
             if intersection_data:
-                # 覆蓋率 vs 步數圖表
                 plt.figure(figsize=(12, 8))
                 steps_data = [data['step'] for data in intersection_data]
                 robot1_coverage = [data['robot1_coverage'] for data in intersection_data]
@@ -470,38 +398,25 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
                 intersection_coverage = [data['intersection_coverage'] for data in intersection_data]
                 union_coverage = [data['union_coverage'] for data in intersection_data]
                 
+                # 繪製四條曲線
                 plt.plot(steps_data, robot1_coverage, 'b-', linewidth=2, label='Robot 1')
                 plt.plot(steps_data, robot2_coverage, 'r-', linewidth=2, label='Robot 2')
                 plt.plot(steps_data, intersection_coverage, 'g-', linewidth=2, label='Intersection')
                 plt.plot(steps_data, union_coverage, 'k-', linewidth=2, label='Union')
                 
-                plt.xlabel('Steps', fontsize=14)
+                # 添加標籤和標題
+                plt.xlabel('Time (steps)', fontsize=14)
                 plt.ylabel('Coverage', fontsize=14)
-                plt.title(f'Coverage vs Steps (Start Point {start_idx+1})', fontsize=16)
+                plt.title(f'Time-Coverage Analysis (Start Point {start_idx+1})', fontsize=16)
+                
+                # 添加網格和圖例
                 plt.grid(True, linestyle='--', alpha=0.7)
                 plt.legend(fontsize=12)
+                
+                # 設置y軸範圍
                 plt.ylim(0, 1.05)
                 
-                plt.savefig(os.path.join(current_output_dir, 'coverage_vs_steps.png'), dpi=300, bbox_inches='tight')
-                plt.close()
-                
-                # 覆蓋率 vs 時間圖表
-                plt.figure(figsize=(12, 8))
-                time_data = [data['elapsed_time'] for data in intersection_data]
-                
-                plt.plot(time_data, robot1_coverage, 'b-', linewidth=2, label='Robot 1')
-                plt.plot(time_data, robot2_coverage, 'r-', linewidth=2, label='Robot 2')
-                plt.plot(time_data, intersection_coverage, 'g-', linewidth=2, label='Intersection')
-                plt.plot(time_data, union_coverage, 'k-', linewidth=2, label='Union')
-                
-                plt.xlabel('Time (seconds)', fontsize=14)
-                plt.ylabel('Coverage', fontsize=14)
-                plt.title(f'Coverage vs Time (Start Point {start_idx+1})', fontsize=16)
-                plt.grid(True, linestyle='--', alpha=0.7)
-                plt.legend(fontsize=12)
-                plt.ylim(0, 1.05)
-                
-                plt.savefig(os.path.join(current_output_dir, 'coverage_vs_time.png'), dpi=300, bbox_inches='tight')
+                plt.savefig(os.path.join(current_output_dir, 'time_coverage_analysis.png'), dpi=300, bbox_inches='tight')
                 plt.close()
             
             # 停止追蹤
@@ -515,11 +430,7 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
                 if robot is not None and hasattr(robot, 'cleanup_visualization'):
                     robot.cleanup_visualization()
             
-            print(f"完成起始點 {start_idx+1} 的測試")
-            print(f"總步數: {steps}")
-            print(f"完成時間: {time_formatted}")
-            print(f"最終覆蓋率: {final_coverage:.2%}")
-            print(f"探索完成: {'是' if exploration_complete else '否'}")
+            print(f"完成起始點 {start_idx+1} 的測試，總步數: {steps}")
             
         except Exception as e:
             print(f"測試過程中出錯: {str(e)}")
@@ -609,7 +520,6 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
     print(f"\n===== 完成所有起始點的測試 =====")
     print(f"結果儲存在: {output_dir}")
     print(f"覆蓋率數據儲存在: {csv_path}")
-    print(f"完成時間數據儲存在: {completion_csv_path}")
     print(f"測試完成！共生成了 {len(start_points_list)} 組不同起始點的時間-覆蓋率分析圖表")
 
 def main():
