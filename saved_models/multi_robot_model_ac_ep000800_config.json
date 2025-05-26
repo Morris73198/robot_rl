@@ -1,0 +1,12 @@
+{
+    "input_shape": [
+        84,
+        84,
+        1
+    ],
+    "max_frontiers": 50,
+    "d_model": 256,
+    "num_heads": 8,
+    "dff": 512,
+    "dropout_rate": 0.1
+}
