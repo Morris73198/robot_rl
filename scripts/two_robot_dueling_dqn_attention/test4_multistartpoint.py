@@ -450,7 +450,7 @@ def test_multiple_start_points(model_path, map_file_path, start_points_list, out
 
 def main():
     # 指定模型路徑
-    model_path = os.path.join(MODEL_DIR, 'best0320.h5')
+    model_path = os.path.join(MODEL_DIR, 'dueling.h5')
     
     if not os.path.exists(model_path):
         print(f"錯誤: 在 {model_path} 找不到模型檔案")
@@ -459,7 +459,7 @@ def main():
     print(f"模型路徑: {model_path}")
     
     # 指定地圖檔案路徑
-    map_file_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6112b.png')
+    map_file_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6032b.png')
     
     # 檢查地圖檔案是否存在
     if not os.path.exists(map_file_path):
@@ -472,13 +472,13 @@ def main():
     start_points = [
         [[100, 100], [100, 100]],  # 起始點 1
         [[520, 120], [520, 120]],  # 起始點 2
-        [[630, 150], [630, 150]],   # 起始點 3
+        [[250, 250], [250, 250]],   # 起始點 3
         [[250, 130], [250, 130]],   # 起始點 4
         [[250, 100], [250, 100]],  # 起始點 5
         [[400, 120], [400, 120]],  # 起始點 6
         [[140, 410], [140, 410]],   # 起始點 7
         [[110, 590], [110, 590]],   # 起始點 8
-        [[900, 300], [90, 300]],   # 起始點 9
+        [[90, 300], [90, 300]],   # 起始點 9
         [[260, 200], [260, 200]],  # 起始點 10
     ]
     
