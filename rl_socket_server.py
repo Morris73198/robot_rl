@@ -103,17 +103,122 @@ def preprocess_state(state):
         traceback.print_exc()
         raise
 
-def get_best_frontier(state, robot_name="robot1"):
-    """獲取最佳frontier點"""
+def get_best_frontiers_for_both_robots(state):
+    """為兩個機器人獲取不同的最佳frontier點"""
     try:
-        print(f"\n=== 為 {robot_name} 尋找最佳frontier ===")
+        print(f"\n=== 為兩個機器人尋找不同的最佳frontier ===")
         
         # 預處理狀態
         map_img, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target, valid_frontiers = preprocess_state(state)
         
         if valid_frontiers == 0:
             print("沒有有效的frontier點")
-            return [0.0, 0.0]  # 回傳預設點而不是None
+            return {
+                "robot1_target": [0.0, 0.0],
+                "robot2_target": [0.0, 0.0]
+            }
+        
+        print(f"開始模型預測，有效frontier數量: {valid_frontiers}")
+        
+        # 模型預測
+        preds = model.predict(map_img, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target)
+        print(f"模型預測完成，輸出結構: {type(preds)}")
+        
+        results = {}
+        
+        if isinstance(preds, dict) and 'robot1' in preds and 'robot2' in preds:
+            # 獲取兩個機器人的Q值
+            robot1_qvals = preds['robot1'][0, :valid_frontiers]
+            robot2_qvals = preds['robot2'][0, :valid_frontiers]
+            
+            print(f"robot1 Q值: {robot1_qvals}")
+            print(f"robot2 Q值: {robot2_qvals}")
+            
+            # 智能分配策略：確保不同目標
+            if valid_frontiers == 1:
+                # 只有一個frontier，兩個機器人分配相同點
+                best_point = frontiers[0][0].tolist()
+                results["robot1_target"] = best_point
+                results["robot2_target"] = best_point
+                print(f"只有一個frontier，兩個機器人都分配: {best_point}")
+                
+            elif valid_frontiers >= 2:
+                # 多個frontier，使用智能分配
+                robot1_best_idx = int(np.argmax(robot1_qvals))
+                robot2_best_idx = int(np.argmax(robot2_qvals))
+                
+                if robot1_best_idx != robot2_best_idx:
+                    # 第一選擇不同，直接分配
+                    results["robot1_target"] = frontiers[0][robot1_best_idx].tolist()
+                    results["robot2_target"] = frontiers[0][robot2_best_idx].tolist()
+                    print(f"不同第一選擇 - robot1:{robot1_best_idx}, robot2:{robot2_best_idx}")
+                else:
+                    # 第一選擇相同，需要智能分配
+                    print(f"相同第一選擇: {robot1_best_idx}")
+                    
+                    # 比較Q值，高的拿第一選擇
+                    if robot1_qvals[robot1_best_idx] >= robot2_qvals[robot2_best_idx]:
+                        # robot1 獲得第一選擇
+                        results["robot1_target"] = frontiers[0][robot1_best_idx].tolist()
+                        # robot2 獲得第二選擇
+                        robot2_sorted = np.argsort(robot2_qvals)[::-1]
+                        robot2_second_idx = robot2_sorted[1] if len(robot2_sorted) > 1 else robot2_sorted[0]
+                        results["robot2_target"] = frontiers[0][robot2_second_idx].tolist()
+                        print(f"robot1獲得第一選擇:{robot1_best_idx}, robot2獲得第二選擇:{robot2_second_idx}")
+                    else:
+                        # robot2 獲得第一選擇
+                        results["robot2_target"] = frontiers[0][robot2_best_idx].tolist()
+                        # robot1 獲得第二選擇
+                        robot1_sorted = np.argsort(robot1_qvals)[::-1]
+                        robot1_second_idx = robot1_sorted[1] if len(robot1_sorted) > 1 else robot1_sorted[0]
+                        results["robot1_target"] = frontiers[0][robot1_second_idx].tolist()
+                        print(f"robot2獲得第一選擇:{robot2_best_idx}, robot1獲得第二選擇:{robot1_second_idx}")
+                
+        else:
+            # 處理非標準格式輸出
+            print(f"使用備用分配策略")
+            if isinstance(preds, np.ndarray):
+                if len(preds.shape) >= 2:
+                    qvals = preds[0, :valid_frontiers]
+                else:
+                    qvals = preds[:valid_frontiers]
+            else:
+                qvals = np.random.rand(valid_frontiers)
+            
+            # 按Q值排序分配
+            sorted_indices = np.argsort(qvals)[::-1]
+            
+            if valid_frontiers >= 2:
+                results["robot1_target"] = frontiers[0][sorted_indices[0]].tolist()
+                results["robot2_target"] = frontiers[0][sorted_indices[1]].tolist()
+                print(f"備用策略 - robot1:{sorted_indices[0]}, robot2:{sorted_indices[1]}")
+            else:
+                best_point = frontiers[0][sorted_indices[0]].tolist()
+                results["robot1_target"] = best_point
+                results["robot2_target"] = best_point
+                print(f"備用策略 - 相同點: {best_point}")
+        
+        return results
+        
+    except Exception as e:
+        print(f"獲取最佳frontier時發生錯誤: {e}")
+        traceback.print_exc()
+        return {
+            "robot1_target": [0.0, 0.0],
+            "robot2_target": [0.0, 0.0]
+        }
+
+def get_best_frontier_single(state, robot_name="robot1"):
+    """為單個機器人獲取最佳frontier點（保持向後兼容）"""
+    try:
+        print(f"\n=== 為 {robot_name} 尋找最佳frontier（單機器人模式）===")
+        
+        # 預處理狀態
+        map_img, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target, valid_frontiers = preprocess_state(state)
+        
+        if valid_frontiers == 0:
+            print("沒有有效的frontier點")
+            return [0.0, 0.0]
         
         print(f"開始模型預測，有效frontier數量: {valid_frontiers}")
         
@@ -122,16 +227,22 @@ def get_best_frontier(state, robot_name="robot1"):
         print(f"模型預測完成，輸出結構: {type(preds)}")
         
         if isinstance(preds, dict):
-            if robot_name not in preds:
-                print(f"警告: 模型輸出中沒有 {robot_name} 的結果")
-                robot_name = list(preds.keys())[0]  # 使用第一個可用的
-                print(f"使用 {robot_name} 的結果")
-            
-            qvals = preds[robot_name][0, :valid_frontiers]
+            if robot_name in preds:
+                qvals = preds[robot_name][0, :valid_frontiers]
+            else:
+                print(f"警告: 模型輸出中沒有 {robot_name} 的結果，使用第一個可用結果")
+                available_keys = list(preds.keys())
+                if available_keys:
+                    qvals = preds[available_keys[0]][0, :valid_frontiers]
+                else:
+                    return [0.0, 0.0]
         else:
-            # 如果preds不是字典，假設它是numpy array
+            # 假設是numpy array
             print(f"模型輸出不是字典，形狀: {preds.shape}")
-            qvals = preds[0, :valid_frontiers]
+            if len(preds.shape) >= 2:
+                qvals = preds[0, :valid_frontiers]
+            else:
+                qvals = preds[:valid_frontiers]
         
         print(f"Q值: {qvals}")
         
@@ -145,7 +256,7 @@ def get_best_frontier(state, robot_name="robot1"):
     except Exception as e:
         print(f"獲取最佳frontier時發生錯誤: {e}")
         traceback.print_exc()
-        return [0.0, 0.0]  # 回傳預設點
+        return [0.0, 0.0]
 
 def receive_complete_data(conn):
     """接收完整的資料"""
@@ -185,7 +296,8 @@ def main():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, port))
     s.listen(5)
-    print(f"robot_rl socket server listening on {host}:{port} ...")
+    print(f"智能多機器人RL服務器啟動 - {host}:{port}")
+    print("支援功能：避免分配相同目標、智能衝突解決")
     
     try:
         while True:
@@ -193,7 +305,7 @@ def main():
             print(f"\n新連接來自 {addr}")
             
             try:
-                conn.settimeout(10.0)  # 設定超時
+                conn.settimeout(10.0)
                 
                 # 接收完整資料
                 state = receive_complete_data(conn)
@@ -209,6 +321,7 @@ def main():
                 print(f"  - frontiers: {len(state.get('frontiers', []))} 個")
                 print(f"  - robot1_pose: {state.get('robot1_pose', '缺失')}")
                 print(f"  - robot2_pose: {state.get('robot2_pose', '缺失')}")
+                print(f"  - request_robot: {state.get('request_robot', '未指定')}")
                 
                 # 檢查關鍵資料
                 if ("map" not in state) or (state["map"] is None):
@@ -223,14 +336,23 @@ def main():
                     conn.close()
                     continue
                 
-                # 推理 robot1
-                best_point = get_best_frontier(state, robot_name="robot1")
+                # 判斷請求類型
+                if "request_robot" in state:
+                    # 單機器人請求
+                    robot_name = state["request_robot"]
+                    best_point = get_best_frontier_single(state, robot_name)
+                    resp = {"target_point": best_point}
+                    print(f"單機器人模式 - {robot_name}: {best_point}")
+                else:
+                    # 多機器人請求（新格式）
+                    results = get_best_frontiers_for_both_robots(state)
+                    resp = results
+                    print(f"多機器人模式: {results}")
                 
                 # 回傳結果
-                resp = {"target_point": best_point}
                 response_data = json.dumps(resp, ensure_ascii=False).encode('utf-8')
                 conn.sendall(response_data)
-                print(f"回傳 target: {resp['target_point']}")
+                print(f"回傳結果: {resp}")
                 
             except Exception as e:
                 print(f"處理請求時發生錯誤: {e}")
