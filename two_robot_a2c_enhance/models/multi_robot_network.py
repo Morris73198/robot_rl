@@ -4,6 +4,15 @@ from tensorflow.keras import layers, models, regularizers
 import json
 import os
 
+# 在模塊開頭設置GPU記憶體增長
+try:
+    physical_devices = tf.config.experimental.list_physical_devices('GPU')
+    if len(physical_devices) > 0:
+        tf.config.experimental.set_memory_growth(physical_devices[0], True)
+        print(f"GPU memory growth enabled for {physical_devices[0]}")
+except Exception as e:
+    print(f"GPU setup warning: {e}")
+
 class LayerNormalization(layers.Layer):
     """自定義層正規化層"""
     def __init__(self, epsilon=1e-6, **kwargs):
@@ -34,7 +43,7 @@ class LayerNormalization(layers.Layer):
         return config
 
 class SpatialAttention(layers.Layer):
-    """空間注意力層 - 簡化版"""
+    """空間注意力層 - 穩定版本"""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -56,317 +65,406 @@ class SpatialAttention(layers.Layer):
     def get_config(self):
         return super().get_config()
 
-class PositionalEncoding(layers.Layer):
-    """位置編碼層 - 簡化版"""
-    def __init__(self, max_position, d_model, **kwargs):
+class MultiHeadAttention(layers.Layer):
+    """多頭注意力層 - 記憶體優化版"""
+    def __init__(self, d_model, num_heads, dropout_rate=0.1, **kwargs):
         super().__init__(**kwargs)
-        self.max_position = max_position
         self.d_model = d_model
+        self.num_heads = num_heads
+        self.dropout_rate = dropout_rate
+        
+        assert d_model % num_heads == 0
+        self.depth = d_model // num_heads
         
     def build(self, input_shape):
-        # 使用簡化的線性位置編碼
-        position_enc = np.zeros((self.max_position, self.d_model))
-        for pos in range(self.max_position):
-            for i in range(self.d_model):
-                if i % 2 == 0:
-                    position_enc[pos, i] = np.sin(pos / np.power(10000, 2 * i / self.d_model))
-                else:
-                    position_enc[pos, i] = np.cos(pos / np.power(10000, 2 * (i - 1) / self.d_model))
-                    
-        self.pos_encoding = tf.convert_to_tensor(position_enc, dtype=tf.float32)
-        self.pos_encoding = tf.expand_dims(self.pos_encoding, axis=0)
+        self.wq = layers.Dense(self.d_model, name='query_dense')
+        self.wk = layers.Dense(self.d_model, name='key_dense')
+        self.wv = layers.Dense(self.d_model, name='value_dense')
+        self.dense = layers.Dense(self.d_model, name='output_dense')
+        self.dropout = layers.Dropout(self.dropout_rate)
+        self.layer_norm = LayerNormalization()
         super().build(input_shape)
         
-    def call(self, inputs):
-        seq_len = tf.shape(inputs)[1]
-        return inputs + self.pos_encoding[:, :seq_len, :]
-    
     def get_config(self):
         config = super().get_config()
         config.update({
-            'max_position': self.max_position,
-            'd_model': self.d_model
+            'd_model': self.d_model,
+            'num_heads': self.num_heads,
+            'dropout_rate': self.dropout_rate
         })
         return config
+        
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+        
+    def call(self, inputs, mask=None, training=None):
+        if isinstance(inputs, list):
+            q, k, v = inputs
+        else:
+            q = k = v = inputs
+            
+        batch_size = tf.shape(q)[0]
+        
+        # 保存原始輸入用於殘差連接
+        original_input = inputs if not isinstance(inputs, list) else inputs[0]
+        
+        q = self.wq(q)
+        k = self.wk(k)
+        v = self.wv(v)
+        
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        
+        scaled_attention = self.scaled_dot_product_attention(q, k, v, mask)
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+        concat_attention = tf.reshape(scaled_attention, 
+                                    (batch_size, -1, self.d_model))
+        
+        output = self.dense(concat_attention)
+        output = self.dropout(output, training=training)
+        
+        # 修復殘差連接 - 確保維度匹配
+        if original_input.shape[-1] == output.shape[-1]:
+            output = self.layer_norm(output + original_input)
+        else:
+            # 如果維度不匹配，只使用LayerNorm而不加殘差
+            output = self.layer_norm(output)
+        
+        return output
+        
+    def scaled_dot_product_attention(self, q, k, v, mask=None):
+        matmul_qk = tf.matmul(q, k, transpose_b=True)
+        dk = tf.cast(tf.shape(k)[-1], tf.float32)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+        
+        if mask is not None:
+            scaled_attention_logits += (mask * -1e9)
+            
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        attention_weights = self.dropout(attention_weights)
+        output = tf.matmul(attention_weights, v)
+        return output
 
 class CrossRobotAttention(layers.Layer):
-    """跨機器人注意力層 - 優化版"""
-    def __init__(self, d_model, **kwargs):
+    """跨機器人注意力層"""
+    def __init__(self, d_model, dropout_rate=0.1, **kwargs):
         super().__init__(**kwargs)
         self.d_model = d_model
+        self.dropout_rate = dropout_rate
         
     def build(self, input_shape):
-        # 簡化投影層
-        self.robot1_projection = layers.Dense(self.d_model, name='robot1_projection')
-        self.robot2_projection = layers.Dense(self.d_model, name='robot2_projection')
-        
-        # 使用標準注意力層代替自定義實現
-        self.attention = layers.Attention(use_scale=True, dropout=0.1)
-        
-        # 正規化層
+        self.projection1 = layers.Dense(self.d_model, name='robot1_projection')
+        self.projection2 = layers.Dense(self.d_model, name='robot2_projection')
+        self.attention = layers.Attention(use_scale=True, dropout=self.dropout_rate)
         self.layer_norm1 = LayerNormalization()
         self.layer_norm2 = LayerNormalization()
         super().build(input_shape)
         
     def get_config(self):
         config = super().get_config()
-        config.update({'d_model': self.d_model})
+        config.update({
+            'd_model': self.d_model,
+            'dropout_rate': self.dropout_rate
+        })
         return config
         
     def call(self, inputs):
         robot1_features, robot2_features = inputs
         
-        # 投影到相同維度
-        robot1_proj = self.robot1_projection(robot1_features)
-        robot2_proj = self.robot2_projection(robot2_features)
+        robot1_proj = self.projection1(robot1_features)
+        robot2_proj = self.projection2(robot2_features)
         
-        # 擴展維度以適應注意力機制
         robot1_expanded = tf.expand_dims(robot1_proj, axis=1)
         robot2_expanded = tf.expand_dims(robot2_proj, axis=1)
         
-        # Robot1 attends to Robot2
         r1_to_r2 = self.attention([robot1_expanded, robot2_expanded, robot2_expanded])
         r1_enhanced = self.layer_norm1(robot1_expanded + r1_to_r2)
         
-        # Robot2 attends to Robot1
         r2_to_r1 = self.attention([robot2_expanded, robot1_expanded, robot1_expanded])
         r2_enhanced = self.layer_norm2(robot2_expanded + r2_to_r1)
         
-        # 移除額外維度
         return tf.squeeze(r1_enhanced, axis=1), tf.squeeze(r2_enhanced, axis=1)
 
-class TemporalAttentionModule(layers.Layer):
-    """時間注意力模組 - 大幅簡化版本"""
-    def __init__(self, d_model, **kwargs):
+class TemporalAttention(layers.Layer):
+    """時間注意力層 - 簡化版本"""
+    def __init__(self, d_model, memory_length=8, dropout_rate=0.1, **kwargs):
         super().__init__(**kwargs)
         self.d_model = d_model
+        self.memory_length = memory_length
+        self.dropout_rate = dropout_rate
         
     def build(self, input_shape):
-        # 簡化的處理層
-        self.input_projection = layers.Dense(self.d_model, name='input_projection')
-        self.temporal_dense = layers.Dense(self.d_model, activation='relu', name='temporal_dense')
-        self.output_dense = layers.Dense(self.d_model, name='output_dense')
-        
-        # 正規化和dropout
-        self.layer_norm = LayerNormalization()
-        self.dropout = layers.Dropout(0.1)
-        
-        super().build(input_shape)
-        
-    def get_config(self):
-        config = super().get_config()
-        config.update({'d_model': self.d_model})
-        return config
-        
-    def call(self, inputs, training=None):
-        # 投影到目標維度
-        projected = self.input_projection(inputs)
-        
-        # 簡單的前饋處理
-        temporal_features = self.temporal_dense(projected)
-        temporal_features = self.dropout(temporal_features, training=training)
-        temporal_features = self.output_dense(temporal_features)
-        
-        # 殘差連接和正規化
-        output = self.layer_norm(projected + temporal_features)
-        
-        return output
-
-class AdaptiveAttentionFusion(layers.Layer):
-    """自適應注意力融合層 - 簡化版"""
-    def __init__(self, d_model, **kwargs):
-        super().__init__(**kwargs)
-        self.d_model = d_model
-        
-    def build(self, input_shape):
-        # 投影層
-        self.frontier_projection = layers.Dense(self.d_model, name='frontier_projection')
-        self.cross_robot_projection = layers.Dense(self.d_model, name='cross_robot_projection')
-        self.temporal_projection = layers.Dense(self.d_model, name='temporal_projection')
-        self.map_projection = layers.Dense(self.d_model, name='map_projection')
-        
-        # 簡化的權重網路
-        self.weight_network = layers.Dense(3, activation='softmax', name='weight_network')
-        self.layer_norm = LayerNormalization()
-        super().build(input_shape)
-        
-    def get_config(self):
-        config = super().get_config()
-        config.update({'d_model': self.d_model})
-        return config
-        
-    def call(self, inputs):
-        frontier_features, cross_robot_features, temporal_features, map_features = inputs
-        
-        # 投影到相同維度
-        frontier_proj = self.frontier_projection(frontier_features)
-        cross_robot_proj = self.cross_robot_projection(cross_robot_features)
-        temporal_proj = self.temporal_projection(temporal_features)
-        map_proj = self.map_projection(map_features)
-        
-        # 計算權重
-        concatenated = tf.concat([frontier_proj, cross_robot_proj, temporal_proj], axis=-1)
-        weights = self.weight_network(concatenated)
-        w1, w2, w3 = tf.split(weights, 3, axis=-1)
-        
-        # 加權融合
-        weighted_features = (
-            w1 * frontier_proj + 
-            w2 * cross_robot_proj + 
-            w3 * temporal_proj
+        # 使用可訓練的記憶體
+        self.memory = self.add_weight(
+            name="temporal_memory",
+            shape=[1, self.memory_length, self.d_model],
+            initializer='zeros',
+            trainable=True
         )
         
-        # 殘差連接
-        output = weighted_features + map_proj
-        output = self.layer_norm(output)
+        self.attention = layers.Attention(use_scale=True, dropout=self.dropout_rate)
+        self.layer_norm = LayerNormalization()
+        super().build(input_shape)
         
+    def call(self, inputs, training=None):
+        if len(inputs.shape) > 2:
+            inputs = tf.reduce_mean(inputs, axis=list(range(1, len(tf.shape(inputs))-1)))
+        
+        query = tf.expand_dims(inputs, axis=1)
+        batch_size = tf.shape(query)[0]
+        
+        key_value = tf.repeat(self.memory, batch_size, axis=0)
+        
+        attended = self.attention([query, key_value, key_value])
+        output = self.layer_norm(query + attended)
+        
+        return tf.squeeze(output, axis=1)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'd_model': self.d_model,
+            'memory_length': self.memory_length,
+            'dropout_rate': self.dropout_rate
+        })
+        return config
+
+class AdaptiveAttentionFusion(layers.Layer):
+    """自適應注意力融合層"""
+    def __init__(self, d_model, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        
+    def build(self, input_shape):
+        self.weight_net = layers.Dense(4, activation='softmax', name='fusion_weights')
+        self.layer_norm = LayerNormalization()
+        super().build(input_shape)
+        
+    def call(self, inputs):
+        original, spatial_attn, cross_robot_attn, temporal_attn = inputs
+        
+        # 確保所有輸入都是2D
+        if len(spatial_attn.shape) > 2:
+            spatial_attn = tf.reduce_mean(spatial_attn, axis=list(range(1, len(tf.shape(spatial_attn))-1)))
+        if len(cross_robot_attn.shape) > 2:
+            cross_robot_attn = tf.reduce_mean(cross_robot_attn, axis=list(range(1, len(tf.shape(cross_robot_attn))-1)))
+        if len(temporal_attn.shape) > 2:
+            temporal_attn = tf.reduce_mean(temporal_attn, axis=list(range(1, len(tf.shape(temporal_attn))-1)))
+        
+        # 生成融合權重
+        features_concat = tf.concat([
+            spatial_attn, cross_robot_attn, temporal_attn, original
+        ], axis=-1)
+        
+        weights = self.weight_net(features_concat)
+        w1, w2, w3, w4 = tf.split(weights, 4, axis=-1)
+        
+        # 加權融合
+        fused = (w1 * spatial_attn + w2 * cross_robot_attn + 
+                w3 * temporal_attn + w4 * original)
+        
+        output = self.layer_norm(original + fused)
         return output
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({'d_model': self.d_model})
+        return config
 
 class MultiRobotACModel:
-    """多機器人 Actor-Critic 模型 - 穩定優化版"""
+    """多機器人 Actor-Critic 模型 - 穩定版本"""
     def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
         self.input_shape = input_shape
         self.max_frontiers = max_frontiers
         
-        # 大幅降低模型複雜度以提高穩定性
-        self.d_model = 128  # 從 256 降到 128
-        self.num_heads = 4  # 從 8 降到 4
-        self.dff = 256      # 從 512 降到 256
-        self.dropout_rate = 0.2  # 增加 dropout 率
-
+        # 保持足夠大的模型以滿足>1MB要求
+        self.d_model = 256  # 恢復較大的維度
+        self.num_heads = 8
+        self.dff = 512
+        self.dropout_rate = 0.15  # 適中的dropout率
+        
         # 創建 Actor 和 Critic 網絡
         self.actor = self._build_actor()
         self.critic = self._build_critic()
-
-        # 打印模型參數統計
-        self._print_model_summary()
-
-    def _print_model_summary(self):
-        """打印模型參數統計"""
+        
+        # 打印模型信息
+        self._print_model_info()
+        
+    def _print_model_info(self):
+        """打印模型信息"""
         actor_params = self.actor.count_params()
         critic_params = self.critic.count_params()
         total_params = actor_params + critic_params
         
-        print("\n===== 優化後模型參數統計 =====")
+        print("\n===== 模型參數統計 =====")
         print(f"Actor 參數: {actor_params:,}")
         print(f"Critic 參數: {critic_params:,}")
         print(f"總參數數量: {total_params:,}")
         print(f"預期權重檔案大小: {total_params * 4 / (1024*1024):.2f} MB")
-        print("===============================\n")
+        print("=======================\n")
         
     def _build_perception_module(self, inputs):
-        """構建感知模塊 - 降低複雜度"""
-        # 降低輸入分辨率
+        """構建感知模塊"""
+        # 適度降低解析度
         x = layers.AveragePooling2D(pool_size=(2, 2))(inputs)
         
-        # 大幅減少特徵數量
+        # 多尺度特徵提取
         conv_configs = [
-            {'filters': 16, 'kernel_size': 3, 'strides': 2},  # 從32降到16
-            {'filters': 16, 'kernel_size': 5, 'strides': 2},
-            {'filters': 16, 'kernel_size': 7, 'strides': 2}
+            {'filters': 32, 'kernel_size': 3, 'strides': 2},
+            {'filters': 32, 'kernel_size': 5, 'strides': 2},
+            {'filters': 32, 'kernel_size': 7, 'strides': 2}
         ]
         
         features = []
-        for config in conv_configs:
+        for i, config in enumerate(conv_configs):
             branch = layers.Conv2D(
                 filters=config['filters'],
                 kernel_size=config['kernel_size'],
                 strides=config['strides'],
                 padding='same',
-                kernel_regularizer=regularizers.l2(0.01)
+                kernel_regularizer=regularizers.l2(0.01),
+                name=f'conv_branch_{i}'
             )(x)
-            branch = layers.BatchNormalization()(branch)
-            branch = layers.Activation('relu')(branch)
-            branch = SpatialAttention()(branch)
+            branch = layers.BatchNormalization(name=f'bn_branch_{i}')(branch)
+            branch = layers.Activation('relu', name=f'relu_branch_{i}')(branch)
+            branch = SpatialAttention(name=f'spatial_attn_{i}')(branch)
             features.append(branch)
             
         # 合併特征
-        x = layers.Add()(features)
-        x = layers.Conv2D(32, 1, padding='same')(x)  # 從64降到32
-        x = layers.BatchNormalization()(x)
-        x = layers.Activation('relu')(x)
-        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Add(name='feature_fusion')(features)
+        x = layers.Conv2D(64, 1, padding='same', name='feature_compress')(x)
+        x = layers.BatchNormalization(name='final_bn')(x)
+        x = layers.Activation('relu', name='final_relu')(x)
+        x = layers.GlobalAveragePooling2D(name='global_pool')(x)
         
         return x
         
-    def _build_state_process_module(self, robot1_pos, robot1_target, robot2_pos, robot2_target):
-        """構建狀態處理模塊 - 簡化版"""
-        # Robot1 state
-        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
-        robot1_features = layers.Dense(32, activation='relu')(robot1_state)
-        robot1_features = layers.Dropout(self.dropout_rate)(robot1_features)
+    def _build_shared_features(self, map_features, frontier_input, robot1_state, robot2_state):
+        """構建共享特徵提取層"""
+        # Frontier特徵處理 - 使用較大維度以確保模型大小
+        frontier_features = layers.Dense(128, activation='relu', name='frontier_dense1')(frontier_input)
+        frontier_features = layers.Dropout(self.dropout_rate, name='frontier_dropout1')(frontier_features)
+        frontier_features = layers.Dense(self.d_model, activation='relu', name='frontier_dense2')(frontier_features)
+        frontier_features = layers.Dropout(self.dropout_rate, name='frontier_dropout2')(frontier_features)
         
-        # Robot2 state  
-        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
-        robot2_features = layers.Dense(32, activation='relu')(robot2_state)
-        robot2_features = layers.Dropout(self.dropout_rate)(robot2_features)
+        # 多頭注意力處理frontier
+        frontier_attention = MultiHeadAttention(
+            d_model=self.d_model, 
+            num_heads=self.num_heads,
+            dropout_rate=self.dropout_rate,
+            name='frontier_attention'
+        )(frontier_features)
         
-        return robot1_features, robot2_features
+        # 前饋網路
+        ff_output = layers.Dense(self.dff, activation='relu', name='frontier_ff1')(frontier_attention)
+        ff_output = layers.Dropout(self.dropout_rate, name='frontier_ff_dropout')(ff_output)
+        ff_output = layers.Dense(self.d_model, name='frontier_ff2')(ff_output)
         
-    def _build_frontier_attention_layer(self, frontier_input):
-        """構建前沿注意力層 - 簡化版"""
-        # 減少Dense層大小
-        x = layers.Dense(64, activation='relu')(frontier_input)
-        x = layers.Dropout(self.dropout_rate)(x)
+        # 殘差連接和層正規化
+        frontier_features = layers.Add(name='frontier_residual')([frontier_attention, ff_output])
+        frontier_features = LayerNormalization(name='frontier_norm')(frontier_features)
         
-        # 位置編碼
-        x = PositionalEncoding(self.max_frontiers, 64)(x)
+        # 處理機器人狀態 - 使用較大維度
+        robot1_feat = layers.Dense(128, activation='relu', name='robot1_dense1')(robot1_state)
+        robot1_feat = layers.Dropout(self.dropout_rate, name='robot1_dropout1')(robot1_feat)
+        robot1_feat = layers.Dense(self.d_model, activation='relu', name='robot1_dense2')(robot1_feat)
+        robot1_feat = layers.Dropout(self.dropout_rate, name='robot1_dropout2')(robot1_feat)
         
-        # 使用更簡單的注意力機制
-        attention_output = layers.MultiHeadAttention(
-            num_heads=2,  # 從4降到2
-            key_dim=32,   # 從16增加到32但總體更簡單
-            dropout=self.dropout_rate
-        )(x, x)
+        robot2_feat = layers.Dense(128, activation='relu', name='robot2_dense1')(robot2_state)
+        robot2_feat = layers.Dropout(self.dropout_rate, name='robot2_dropout1')(robot2_feat)
+        robot2_feat = layers.Dense(self.d_model, activation='relu', name='robot2_dense2')(robot2_feat)
+        robot2_feat = layers.Dropout(self.dropout_rate, name='robot2_dropout2')(robot2_feat)
         
-        # 簡化的前饋網路
-        ff_output = layers.Dense(64, activation='relu')(attention_output)
-        ff_output = layers.Dropout(self.dropout_rate)(ff_output)
+        # 跨機器人注意力
+        robot1_enhanced, robot2_enhanced = CrossRobotAttention(
+            d_model=self.d_model,
+            dropout_rate=self.dropout_rate,
+            name='cross_robot_attention'
+        )([robot1_feat, robot2_feat])
         
-        # Add & Norm
-        output = layers.Add()([attention_output, ff_output])
-        output = LayerNormalization()(output)
+        # 融合機器人特徵
+        robot_features = layers.Concatenate(name='robot_concat')([robot1_enhanced, robot2_enhanced])
+        robot_features = layers.Dense(self.d_model, activation='relu', name='robot_fusion')(robot_features)
+        robot_features = layers.Dropout(self.dropout_rate, name='robot_fusion_dropout')(robot_features)
         
-        # 全局平均池化
-        frontier_features = layers.GlobalAveragePooling1D()(output)
+        # 處理時間維度特徵
+        temporal_frontier_feature = layers.GlobalAveragePooling1D(name='temporal_pool')(frontier_features)
+        temporal_frontier_feature = layers.Dense(self.d_model, activation='relu', name='temporal_dense')(temporal_frontier_feature)
+        temporal_frontier_feature = layers.Dropout(self.dropout_rate, name='temporal_dropout')(temporal_frontier_feature)
         
-        return frontier_features
+        # 時間注意力
+        temporal_features = TemporalAttention(
+            d_model=self.d_model,
+            memory_length=8,
+            dropout_rate=self.dropout_rate,
+            name='temporal_attention'
+        )(temporal_frontier_feature)
         
-    def _build_enhanced_features(self, map_features, frontier_features, 
-                                robot1_features, robot2_features):
-        """構建增強特徵提取 - 大幅簡化"""
-        # 跨機器人注意力 - 使用較小維度
-        cross_attention = CrossRobotAttention(64)  # 從self.d_model降到64
-        r1_enhanced, r2_enhanced = cross_attention([robot1_features, robot2_features])
+        # 處理地圖特徵
+        map_features_enhanced = layers.Dense(self.d_model, activation='relu', name='map_dense1')(map_features)
+        map_features_enhanced = layers.Dropout(self.dropout_rate, name='map_dropout1')(map_features_enhanced)
+        map_features_enhanced = layers.Dense(self.d_model, activation='relu', name='map_dense2')(map_features_enhanced)
+        map_features_enhanced = layers.Dropout(self.dropout_rate, name='map_dropout2')(map_features_enhanced)
         
-        # 合併跨機器人特徵
-        cross_robot_features = layers.Concatenate()([r1_enhanced, r2_enhanced])
+        frontier_global = layers.GlobalAveragePooling1D(name='frontier_global_pool')(frontier_features)
+        frontier_global = layers.Dense(self.d_model, activation='relu', name='frontier_global_dense')(frontier_global)
+        frontier_global = layers.Dropout(self.dropout_rate, name='frontier_global_dropout')(frontier_global)
         
-        # 時間注意力模組 - 使用較小維度
-        temporal_attention = TemporalAttentionModule(64)  # 從self.d_model降到64
-        temporal_features = temporal_attention(frontier_features)
-        
-        # 自適應注意力融合 - 使用較小維度
-        fusion_layer = AdaptiveAttentionFusion(64)  # 從self.d_model降到64
-        fused_features = fusion_layer([
-            frontier_features, 
-            cross_robot_features, 
-            temporal_features, 
-            map_features
+        # 自適應注意力融合
+        fused_features = AdaptiveAttentionFusion(
+            d_model=self.d_model,
+            name='adaptive_fusion'
+        )([
+            map_features_enhanced,
+            frontier_global,
+            robot_features,
+            temporal_features
         ])
         
-        return fused_features
+        # 最終特徵處理 - 添加更多層以增加參數量
+        combined_features = layers.Concatenate(name='final_concat')([
+            map_features_enhanced,
+            fused_features,
+            robot_features
+        ])
         
-    def _build_process_module(self, features):
-        """構建處理模塊 - 減少複雜度"""
-        # 減少層大小
-        x = layers.Dense(128, activation='relu')(features)  # 從256降到128
-        x = layers.Dropout(self.dropout_rate)(x)
-        x = layers.Dense(64, activation='relu')(x)  # 從128降到64
-        x = layers.Dropout(self.dropout_rate)(x)
+        x = layers.Dense(self.dff, activation='relu', name='final_dense1')(combined_features)
+        x = layers.Dropout(self.dropout_rate, name='final_dropout1')(x)
+        x = layers.Dense(self.d_model, activation='relu', name='final_dense2')(x)
+        x = layers.Dropout(self.dropout_rate, name='final_dropout2')(x)
+        x = layers.Dense(self.d_model//2, activation='relu', name='final_dense3')(x)
+        x = layers.Dropout(self.dropout_rate, name='final_dropout3')(x)
         
         return x
+        
+    def _build_policy_head(self, features, name_prefix):
+        """構建策略輸出頭"""
+        x = layers.Dense(256, activation='relu', name=f'{name_prefix}_policy_dense1')(features)
+        x = layers.Dropout(self.dropout_rate, name=f'{name_prefix}_policy_dropout1')(x)
+        x = layers.Dense(128, activation='relu', name=f'{name_prefix}_policy_dense2')(x)
+        x = layers.Dropout(self.dropout_rate, name=f'{name_prefix}_policy_dropout2')(x)
+        x = layers.Dense(64, activation='relu', name=f'{name_prefix}_policy_dense3')(x)
+        x = layers.Dropout(self.dropout_rate, name=f'{name_prefix}_policy_dropout3')(x)
+        policy = layers.Dense(
+            self.max_frontiers,
+            activation='softmax',
+            name=name_prefix
+        )(x)
+        return policy
 
+    def _build_value_head(self, features, name_prefix):
+        """構建價值輸出頭"""
+        x = layers.Dense(256, activation='relu', name=f'{name_prefix}_value_dense1')(features)
+        x = layers.Dropout(self.dropout_rate, name=f'{name_prefix}_value_dropout1')(x)
+        x = layers.Dense(128, activation='relu', name=f'{name_prefix}_value_dense2')(x)
+        x = layers.Dropout(self.dropout_rate, name=f'{name_prefix}_value_dropout2')(x)
+        x = layers.Dense(64, activation='relu', name=f'{name_prefix}_value_dense3')(x)
+        x = layers.Dropout(self.dropout_rate, name=f'{name_prefix}_value_dropout3')(x)
+        value = layers.Dense(1, name=name_prefix)(x)
+        return value
+        
     def _build_actor(self):
         """構建 Actor 網絡"""
         # 輸入層
@@ -377,41 +475,24 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 感知模塊
+        # 特征提取
         map_features = self._build_perception_module(map_input)
         
-        # 狀態處理模塊
-        robot1_features, robot2_features = self._build_state_process_module(
-            robot1_pos, robot1_target, robot2_pos, robot2_target
+        # 機器人狀態編碼
+        robot1_state = layers.Concatenate(name='robot1_state_concat')([robot1_pos, robot1_target])
+        robot2_state = layers.Concatenate(name='robot2_state_concat')([robot2_pos, robot2_target])
+        
+        # 共享特征提取
+        shared_features = self._build_shared_features(
+            map_features, 
+            frontier_input, 
+            robot1_state, 
+            robot2_state
         )
         
-        # 前沿注意力層
-        frontier_features = self._build_frontier_attention_layer(frontier_input)
-        
-        # 增強特徵提取
-        enhanced_features = self._build_enhanced_features(
-            map_features, frontier_features, robot1_features, robot2_features
-        )
-        
-        # 處理模塊
-        processed_features = self._build_process_module(enhanced_features)
-        
-        # Actor 網絡輸出 - 減少層大小
-        # Robot1 policy
-        robot1_policy = layers.Dense(64, activation='relu')(processed_features)  # 從128降到64
-        robot1_policy = layers.Dropout(self.dropout_rate)(robot1_policy)
-        robot1_policy = layers.Dense(32, activation='relu')(robot1_policy)  # 從64降到32
-        robot1_policy = layers.Dropout(self.dropout_rate)(robot1_policy)
-        robot1_policy = layers.Dense(self.max_frontiers, activation='softmax', 
-                                   name='robot1_policy')(robot1_policy)
-        
-        # Robot2 policy
-        robot2_policy = layers.Dense(64, activation='relu')(processed_features)  # 從128降到64
-        robot2_policy = layers.Dropout(self.dropout_rate)(robot2_policy)
-        robot2_policy = layers.Dense(32, activation='relu')(robot2_policy)  # 從64降到32
-        robot2_policy = layers.Dropout(self.dropout_rate)(robot2_policy)
-        robot2_policy = layers.Dense(self.max_frontiers, activation='softmax', 
-                                   name='robot2_policy')(robot2_policy)
+        # 輸出層
+        robot1_policy = self._build_policy_head(shared_features, 'robot1_policy')
+        robot2_policy = self._build_policy_head(shared_features, 'robot2_policy')
         
         model = models.Model(
             inputs={
@@ -428,15 +509,15 @@ class MultiRobotACModel:
             }
         )
         
-        # 使用更小的學習率提高穩定性
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.0003)  # 從0.0001降到0.00005
+        # 使用較小的學習率提高穩定性
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001, clipnorm=1.0)
         model.compile(optimizer=optimizer)
         
         return model
         
     def _build_critic(self):
         """構建 Critic 網絡"""
-        # 輸入層
+        # 與Actor相同的結構，但輸出為價值函數
         map_input = layers.Input(shape=self.input_shape, name='map_input')
         frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
         robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
@@ -444,39 +525,24 @@ class MultiRobotACModel:
         robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
         robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
         
-        # 感知模塊
+        # 特征提取
         map_features = self._build_perception_module(map_input)
         
-        # 狀態處理模塊
-        robot1_features, robot2_features = self._build_state_process_module(
-            robot1_pos, robot1_target, robot2_pos, robot2_target
+        # 機器人狀態編碼
+        robot1_state = layers.Concatenate(name='robot1_state_concat')([robot1_pos, robot1_target])
+        robot2_state = layers.Concatenate(name='robot2_state_concat')([robot2_pos, robot2_target])
+        
+        # 共享特征提取
+        shared_features = self._build_shared_features(
+            map_features, 
+            frontier_input, 
+            robot1_state, 
+            robot2_state
         )
         
-        # 前沿注意力層
-        frontier_features = self._build_frontier_attention_layer(frontier_input)
-        
-        # 增強特徵提取
-        enhanced_features = self._build_enhanced_features(
-            map_features, frontier_features, robot1_features, robot2_features
-        )
-        
-        # 處理模塊
-        processed_features = self._build_process_module(enhanced_features)
-        
-        # Critic 網絡輸出 - 減少層大小
-        # Robot1 value
-        robot1_value = layers.Dense(64, activation='relu')(processed_features)  # 從128降到64
-        robot1_value = layers.Dropout(self.dropout_rate)(robot1_value)
-        robot1_value = layers.Dense(32, activation='relu')(robot1_value)  # 從64降到32
-        robot1_value = layers.Dropout(self.dropout_rate)(robot1_value)
-        robot1_value = layers.Dense(1, name='robot1_value')(robot1_value)
-        
-        # Robot2 value
-        robot2_value = layers.Dense(64, activation='relu')(processed_features)  # 從128降到64
-        robot2_value = layers.Dropout(self.dropout_rate)(robot2_value)
-        robot2_value = layers.Dense(32, activation='relu')(robot2_value)  # 從64降到32
-        robot2_value = layers.Dropout(self.dropout_rate)(robot2_value)
-        robot2_value = layers.Dense(1, name='robot2_value')(robot2_value)
+        # 輸出層
+        robot1_value = self._build_value_head(shared_features, 'robot1_value')
+        robot2_value = self._build_value_head(shared_features, 'robot2_value')
         
         model = models.Model(
             inputs={
@@ -493,8 +559,7 @@ class MultiRobotACModel:
             }
         )
         
-        # 使用更小的學習率
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.0003)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001, clipnorm=1.0)
         model.compile(optimizer=optimizer, loss='mse')
         
         return model
@@ -525,6 +590,7 @@ class MultiRobotACModel:
     
     def train_actor(self, states, frontiers, robot1_pos, robot2_pos,
                 robot1_target, robot2_target, actions, advantages):
+        """訓練 Actor 網路"""
         with tf.GradientTape() as tape:
             policy_dict = self.actor({
                 'map_input': states,
@@ -548,9 +614,9 @@ class MultiRobotACModel:
             
             total_loss = robot1_loss + robot2_loss
             
-        # 增強梯度裁剪
+        # 梯度裁剪
         grads = tape.gradient(total_loss, self.actor.trainable_variables)
-        grads, _ = tf.clip_by_global_norm(grads, 0.3)  # 從0.5降到0.3，更嚴格的裁剪
+        grads, _ = tf.clip_by_global_norm(grads, 1.0)
         self.actor.optimizer.apply_gradients(
             zip(grads, self.actor.trainable_variables))
             
@@ -558,6 +624,7 @@ class MultiRobotACModel:
     
     def train_critic(self, states, frontiers, robot1_pos, robot2_pos, 
                     robot1_target, robot2_target, returns):
+        """訓練 Critic 網路"""
         with tf.GradientTape() as tape:
             values = self.critic({
                 'map_input': states,
@@ -575,9 +642,9 @@ class MultiRobotACModel:
             
             value_loss = robot1_value_loss + robot2_value_loss
             
-        # 增強梯度裁剪
+        # 梯度裁剪
         grads = tape.gradient(value_loss, self.critic.trainable_variables)
-        grads, _ = tf.clip_by_global_norm(grads, 0.3)  # 從0.5降到0.3
+        grads, _ = tf.clip_by_global_norm(grads, 1.0)
         self.critic.optimizer.apply_gradients(
             zip(grads, self.critic.trainable_variables))
             
@@ -589,23 +656,23 @@ class MultiRobotACModel:
         log_prob = tf.math.log(tf.reduce_sum(policy * actions_one_hot, axis=1) + 1e-10)
         policy_loss = -tf.reduce_mean(log_prob * advantages)
         
-        # 降低熵正則化權重以提高穩定性
+        # 熵正則化
         entropy = -tf.reduce_sum(policy * tf.math.log(policy + 1e-10), axis=1)
-        entropy_bonus = 0.005 * tf.reduce_mean(entropy)  # 從0.01降到0.005
+        entropy_bonus = 0.01 * tf.reduce_mean(entropy)
         
         return policy_loss - entropy_bonus
     
     def save(self, filepath):
-        """保存模型到 h5 格式"""
-        print("保存優化後模型...")
+        """保存模型為.h5格式"""
+        print("保存模型為.h5格式...")
         
         try:
-            # 保存 Actor
+            # 保存 Actor 為 .h5 格式
             actor_path = filepath + '_actor.h5'
             print(f"保存 actor 模型到: {actor_path}")
             self.actor.save(actor_path, save_format='h5')
             
-            # 保存 Critic
+            # 保存 Critic 為 .h5 格式
             critic_path = filepath + '_critic.h5'
             print(f"保存 critic 模型到: {critic_path}")
             self.critic.save(critic_path, save_format='h5')
@@ -623,43 +690,56 @@ class MultiRobotACModel:
             with open(filepath + '_config.json', 'w') as f:
                 json.dump(config, f, indent=4)
                 
-            print("優化後模型保存成功")
+            print("模型(.h5格式)保存成功")
             return True
             
         except Exception as e:
             print(f"保存模型時出錯: {str(e)}")
             return False
-
+    
     def load(self, filepath):
-        """載入 h5 格式的模型"""
-        print("載入優化後模型...")
+        """載入.h5格式的模型"""
+        print("載入.h5格式模型...")
         
         try:
             # 載入配置
-            with open(filepath + '_config.json', 'r') as f:
+            config_path = filepath + '_config.json'
+            if not os.path.exists(config_path):
+                print(f"配置文件不存在: {config_path}")
+                return False
+                
+            with open(config_path, 'r') as f:
                 config = json.load(f)
                 
             # 更新模型配置
             self.input_shape = tuple(config['input_shape'])
             self.max_frontiers = config['max_frontiers']
             self.d_model = config['d_model']
-            self.num_heads = config.get('num_heads', 4)
-            self.dff = config.get('dff', 256)
+            self.num_heads = config['num_heads']
+            self.dff = config['dff']
             self.dropout_rate = config['dropout_rate']
             
             # 定義自定義對象
             custom_objects = {
                 'LayerNormalization': LayerNormalization,
                 'SpatialAttention': SpatialAttention,
-                'PositionalEncoding': PositionalEncoding,
+                'MultiHeadAttention': MultiHeadAttention,
                 'CrossRobotAttention': CrossRobotAttention,
-                'TemporalAttentionModule': TemporalAttentionModule,
+                'TemporalAttention': TemporalAttention,
                 'AdaptiveAttentionFusion': AdaptiveAttentionFusion
             }
             
             # 載入模型
             actor_path = filepath + '_actor.h5'
             critic_path = filepath + '_critic.h5'
+            
+            if not os.path.exists(actor_path):
+                print(f"Actor模型文件不存在: {actor_path}")
+                return False
+            if not os.path.exists(critic_path):
+                print(f"Critic模型文件不存在: {critic_path}")
+                return False
+                
             print(f"載入 actor 模型: {actor_path}")
             self.actor = tf.keras.models.load_model(
                 actor_path,
@@ -672,7 +752,7 @@ class MultiRobotACModel:
                 custom_objects=custom_objects
             )
             
-            print("優化後模型載入成功")
+            print("模型(.h5格式)載入成功")
             return True
             
         except Exception as e:
@@ -681,7 +761,7 @@ class MultiRobotACModel:
 
     def verify_model(self):
         """驗證模型"""
-        print("驗證優化後模型...")
+        print("驗證模型...")
         test_inputs = {
             'map_input': np.zeros((1, *self.input_shape)),
             'frontier_input': np.zeros((1, self.max_frontiers, 2)),
@@ -702,7 +782,7 @@ class MultiRobotACModel:
             assert critic_outputs['robot1_value'].shape == (1, 1)
             assert critic_outputs['robot2_value'].shape == (1, 1)
             
-            print("優化後模型驗證通過")
+            print("模型驗證通過")
             return True
             
         except Exception as e:
