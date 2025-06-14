@@ -14,7 +14,7 @@ plt.ion()
 
 def main():
     try:
-        # 指定模型路徑（actor和critic分開保存）
+        # 指定模型路徑（actor和critic分開保存，使用.h5格式）
         model_path = os.path.join(MODEL_DIR, 'multi_robot_model_ac')
         
         # 創建模型
@@ -26,18 +26,20 @@ def main():
         
         start_episode = 0
         
-        # 載入已有的模型（如果存在）
-        if os.path.exists(model_path + '_actor') and os.path.exists(model_path + '_critic'):
+        # 載入已有的模型（如果存在）- 檢查.h5文件
+        if os.path.exists(model_path + '_actor.h5') and os.path.exists(model_path + '_critic.h5'):
             print(f"Loading existing model from: {model_path}")
-            model.load(model_path)
-            # 獲取起始episode（從文件名解析）
-            existing_models = [f for f in os.listdir(MODEL_DIR) if f.startswith('multi_robot_model_ac_ep')]
-            if existing_models:
-                latest_ep = max([int(f.split('ep')[-1].split('_')[0]) for f in existing_models])
-                start_episode = latest_ep
-            print(f"Continuing training from episode {start_episode}")
+            if model.load(model_path):
+                # 獲取起始episode（從文件名解析）
+                existing_models = [f for f in os.listdir(MODEL_DIR) if f.startswith('multi_robot_model_ac_ep') and f.endswith('_actor.h5')]
+                if existing_models:
+                    latest_ep = max([int(f.split('ep')[-1].split('_')[0]) for f in existing_models])
+                    start_episode = latest_ep
+                print(f"Continuing training from episode {start_episode}")
+            else:
+                print("Failed to load existing model, starting fresh training...")
         else:
-            print(f"No existing model found at {model_path}")
+            print(f"No existing .h5 model found at {model_path}")
             print("Starting fresh training...")
         
         # 創建共享環境的兩個機器人
@@ -45,7 +47,7 @@ def main():
         robot1, robot2 = Robot.create_shared_robots(
             index_map=0, 
             train=True, 
-            plot=True
+            plot=False
         )
         
         # 創建機器人個人地圖追蹤器
