@@ -10,7 +10,6 @@ from scipy.ndimage import distance_transform_edt
 import random
 from heapq import heappush, heappop
 from ..config import ROBOT_CONFIG, REWARD_CONFIG
-
 import heapq
 
 
@@ -18,7 +17,7 @@ class Robot:
     @classmethod
     def create_shared_robots(cls, index_map, train=True, plot=True):
         """創建共享環境的機器人實例"""
-        print("Creating robots with shared environment...")  # 調試信息
+        print("Creating robots with shared environment...")
 
         # 創建第一個機器人，它會加載和初始化地圖
         robot1 = cls(index_map, train, plot, is_primary=True)
@@ -27,25 +26,14 @@ class Robot:
         robot2 = cls(index_map, train, plot, is_primary=False, shared_env=robot1)
         
         robot1.other_robot = robot2
-        print(f"Robot1 other_robot set: {robot1.other_robot is not None}")  # 調試信息
-        print(f"Robot2 shared_env set: {robot2.shared_env is not None}")    # 調試信息
+        print(f"Robot1 other_robot set: {robot1.other_robot is not None}")
+        print(f"Robot2 shared_env set: {robot2.shared_env is not None}")
         
         return robot1, robot2
     
-    # ================ 新增：多機器人創建方法 ================
     @classmethod
     def create_multi_robots(cls, num_robots, index_map, train=True, plot=True):
-        """創建多個共享環境的機器人實例
-        
-        Args:
-            num_robots: 機器人數量
-            index_map: 地圖索引
-            train: 是否處於訓練模式
-            plot: 是否繪製可視化
-            
-        Returns:
-            list: 機器人實例列表
-        """
+        """創建多個共享環境的機器人實例"""
         print(f"Creating {num_robots} robots with shared environment...")
         
         if num_robots < 2:
@@ -68,38 +56,34 @@ class Robot:
             
         print(f"Created {num_robots} robots successfully")
         return robots
-    
+  
     def __init__(self, index_map, train, plot, is_primary=True, shared_env=None, robot_id=None, num_robots=None):
-        """初始化機器人環境
+        """初始化機器人環境"""
+        # 確保li_map屬性存在
+        self.li_map = index_map
+        self.mode = train
+        self.plot = plot
+        self.is_primary = is_primary
+        self.shared_env = shared_env
         
-        Args:
-            index_map: 地圖索引
-            train: 是否處於訓練模式
-            plot: 是否繪製可視化
-            is_primary: 是否為主要機器人(負責加載地圖)
-            shared_env: 共享環境的機器人實例
-            robot_id: 機器人ID (新增，向後兼容)
-            num_robots: 總機器人數量 (新增，向後兼容)
-        """
+        # 多機器人支援
+        self.robot_id = robot_id if robot_id is not None else (0 if is_primary else 1)
+        self.num_robots = num_robots if num_robots is not None else 2
+        self.all_robots = []
+        self.other_robots = []
+        
+        # 確保位置都是2D座標
+        self.robot_position = np.zeros(2, dtype=np.int64)
+        self.other_robot_position = None
+        
         if not shared_env and not is_primary:
             raise ValueError("Non-primary robot must have a shared environment")
         if shared_env and is_primary:
             raise ValueError("Primary robot cannot have a shared environment")
-        self.mode = train
-        self.plot = plot
-        self.is_primary = is_primary
         
-        self.shared_env = shared_env 
-        
-        # ================ 新增：多機器人支援 ================
-        self.robot_id = robot_id if robot_id is not None else (0 if is_primary else 1)
-        self.num_robots = num_robots if num_robots is not None else 2
-        self.all_robots = []  # 將在後面設置
-        self.other_robots = []  # 將在後面設置
-        
-        self.lethal_cost = 100  # 致命障礙物代價
-        self.decay_factor = 3  # 代價衰減因子
-        self.inflation_radius = ROBOT_CONFIG['robot_size'] * 1.5  # 膨脹半徑為機器人尺寸的1.5倍
+        self.lethal_cost = 100
+        self.decay_factor = 3
+        self.inflation_radius = ROBOT_CONFIG['robot_size'] * 1.5
         
         if is_primary:
             # 主要機器人負責加載地圖和初始化環境
@@ -121,125 +105,97 @@ class Robot:
             if self.mode:
                 random.shuffle(self.map_list)
                 
-            self.li_map = index_map
-            
             # 初始化地圖
             self.global_map, self.initial_positions = self.map_setup(
                 os.path.join(self.map_dir, self.map_list[self.li_map])
             )
             
-            # ================ 修改：支援多機器人起始位置 ================
             # 確保有足夠的起始位置
             if len(self.initial_positions) < self.num_robots:
                 self._generate_additional_positions()
-                
-            # 為當前機器人選擇起始位置
-            self.robot_position = self.initial_positions[self.robot_id].astype(np.int64)
-            # 保持向後兼容：為兩機器人情況設置 other_robot_position
+            
+            # 設置機器人位置（確保是2D）
+            pos = np.array(self.initial_positions[self.robot_id]).flatten()
+            self.robot_position = pos[:2].astype(np.int64)
+            
+            # 向後兼容
             if self.num_robots >= 2:
-                self.other_robot_position = self.initial_positions[1 if self.robot_id == 0 else 0].astype(np.int64)
+                other_id = 1 if self.robot_id == 0 else 0
+                other_pos = np.array(self.initial_positions[other_id]).flatten()
+                self.other_robot_position = other_pos[:2].astype(np.int64)
             
+            # 初始化地圖相關資源
+            self.map_size = self.global_map.shape
             self.op_map = np.ones(self.global_map.shape) * 127
-            self.map_size = np.shape(self.global_map)
-            
-            # 初始化其他屬性
-            self.movement_step = ROBOT_CONFIG['movement_step']
-            self.finish_percent = ROBOT_CONFIG['finish_percent']
-            self.sensor_range = ROBOT_CONFIG['sensor_range']
-            self.robot_size = ROBOT_CONFIG['robot_size']
-            self.local_size = ROBOT_CONFIG['local_size']
-            
-            self.old_position = np.zeros([2])
-            self.old_op_map = np.empty([0])
-            self.current_target_frontier = None
-            self.is_moving_to_target = False
-            self.steps = 0
-            
             self.t = self.map_points(self.global_map)
             self.free_tree = spatial.KDTree(self.free_points(self.global_map).tolist())
             
-            # 在設置完 robot_position 後初始化路徑記錄屬性
-            self.xPoint = np.array([self.robot_position[0]])
-            self.yPoint = np.array([self.robot_position[1]])
-            
-            if self.plot:
-                self.initialize_visualization()
         else:
-            # 次要機器人共享主要機器人的環境
-            self.map_dir = shared_env.map_dir
-            self.map_list = shared_env.map_list
-            self.map_number = shared_env.map_number
-            self.li_map = shared_env.li_map
+            # 共享環境設置
+            self.li_map = self.shared_env.li_map
+            self.global_map = self.shared_env.global_map
+            self.op_map = self.shared_env.op_map
+            self.map_size = self.shared_env.map_size
+            self.map_dir = self.shared_env.map_dir
+            self.map_list = self.shared_env.map_list
+            self.map_number = self.shared_env.map_number
             
-            self.global_map = shared_env.global_map
-            self.op_map = shared_env.op_map
-            self.map_size = shared_env.map_size
-            
-            # ================ 修改：支援多機器人起始位置 ================
-            # 使用對應ID的起始位置
-            if hasattr(shared_env, 'initial_positions') and len(shared_env.initial_positions) > self.robot_id:
-                self.robot_position = shared_env.initial_positions[self.robot_id].astype(np.int64)
+            # 使用不同的起始位置（確保是2D）
+            if hasattr(self.shared_env, 'initial_positions') and len(self.shared_env.initial_positions) > self.robot_id:
+                pos = np.array(self.shared_env.initial_positions[self.robot_id]).flatten()
+                self.robot_position = pos[:2].astype(np.int64)
             else:
-                # 向後兼容：交換位置
-                self.robot_position = shared_env.other_robot_position.copy()
-                
-            # 保持向後兼容：設置 other_robot_position
-            if hasattr(shared_env, 'robot_position'):
-                self.other_robot_position = shared_env.robot_position.copy()
+                shared_pos = np.array(self.shared_env.other_robot_position).flatten()
+                self.robot_position = shared_pos[:2].copy()
             
-            # 共享其他屬性
-            self.movement_step = shared_env.movement_step
-            self.finish_percent = shared_env.finish_percent
-            self.sensor_range = shared_env.sensor_range
-            self.robot_size = shared_env.robot_size 
-            self.local_size = shared_env.local_size
+            primary_pos = np.array(self.shared_env.robot_position).flatten()
+            self.other_robot_position = primary_pos[:2].copy()
             
-            self.old_position = np.zeros([2])
-            self.old_op_map = np.empty([0])
-            self.current_target_frontier = None
-            self.is_moving_to_target = False
-            self.steps = 0
-            
-            self.t = shared_env.t
-            self.free_tree = shared_env.free_tree
-            
-            # 在設置完 robot_position 後初始化路徑記錄屬性
-            self.xPoint = np.array([self.robot_position[0]])
-            self.yPoint = np.array([self.robot_position[1]])
-            
-            if self.plot:
-                self.initialize_visualization()
+            # 共享資源
+            self.t = self.shared_env.t
+            self.free_tree = self.shared_env.free_tree
+        
+        # 機器人配置
+        self.robot_size = ROBOT_CONFIG['robot_size']
+        self.sensor_range = ROBOT_CONFIG['sensor_range']
+        self.local_size = ROBOT_CONFIG['local_size']
+        self.movement_step = ROBOT_CONFIG['movement_step']
+        self.finish_percent = ROBOT_CONFIG['finish_percent']
+        
+        # 初始化狀態
+        self.old_position = np.zeros(2, dtype=np.float64)
+        self.old_op_map = None  # 將在begin()方法中正確初始化
+        self.current_target_frontier = None
+        self.is_moving_to_target = False
+        self.current_path = None
+        self.current_path_index = 0
+        self.steps = 0
+        
+        # 可視化相關
+        if self.plot:
+            self.xPoint = np.array([])
+            self.yPoint = np.array([])
+            self.fig = None
+            self.initialize_visualization()
 
-    # ================ 新增：生成額外起始位置 ================
     def _generate_additional_positions(self):
-        """為不足的機器人生成額外的起始位置"""
-        needed = self.num_robots - len(self.initial_positions)
-        if needed <= 0:
-            return
-            
-        # 獲取自由空間
-        free_space = np.where(self.global_map > 150)
-        free_positions = np.array([free_space[1], free_space[0]]).T
+        """生成額外的起始位置"""
+        free_positions = self.free_points(self.global_map)
+        needed_positions = self.num_robots - len(self.initial_positions)
+        min_distance = self.robot_size * 3
         
-        if len(free_positions) < needed:
-            raise ValueError(f"Map does not have enough free space for {self.num_robots} robots")
-        
-        # 智能分配機器人起始位置
-        min_distance = max(20, self.global_map.shape[0] // 10)
+        existing_positions = list(self.initial_positions)
         additional_positions = []
         
-        # 基於現有位置選擇新位置
-        existing_positions = list(self.initial_positions)
-        
-        for _ in range(needed):
+        for _ in range(needed_positions):
+            max_attempts = 100
             best_pos = None
             best_min_distance = 0
             
-            # 嘗試多次尋找最佳位置
-            for _ in range(min(1000, len(free_positions))):
+            for _ in range(max_attempts):
                 candidate = free_positions[np.random.randint(len(free_positions))]
                 
-                # 計算到所有已選位置的最小距離
+                # 計算與現有位置的最小距離
                 distances = [np.linalg.norm(candidate - pos) for pos in existing_positions]
                 min_dist = min(distances) if distances else float('inf')
                 
@@ -262,16 +218,32 @@ class Robot:
         # 添加到初始位置列表
         self.initial_positions = np.vstack([self.initial_positions, np.array(additional_positions)])
 
-    # ================ 新增：多機器人相關方法 ================
     def get_all_other_robots_positions(self):
-        """獲取所有其他機器人的位置"""
+        """獲取所有其他機器人的位置（確保返回2D座標）"""
+        positions = []
+        
         if not hasattr(self, 'other_robots') or not self.other_robots:
             # 向後兼容：返回單個其他機器人位置
-            if hasattr(self, 'other_robot_position'):
-                return [self.other_robot_position.copy()]
-            return []
+            if hasattr(self, 'other_robot_position') and self.other_robot_position is not None:
+                pos = np.array(self.other_robot_position).flatten()
+                
+                # 確保是2D座標
+                if len(pos) >= 2:
+                    pos = pos[:2]
+                    positions.append(pos.astype(np.float64))
+            
+            return positions
         
-        return [robot.robot_position.copy() for robot in self.other_robots]
+        for robot in self.other_robots:
+            if robot is not None and hasattr(robot, 'robot_position'):
+                pos = np.array(robot.robot_position).flatten()
+                
+                # 確保是2D座標
+                if len(pos) >= 2:
+                    pos = pos[:2]
+                    positions.append(pos.astype(np.float64))
+        
+        return positions
     
     def get_nearby_robots(self, radius=None):
         """獲取附近的機器人"""
@@ -294,10 +266,32 @@ class Robot:
     
     def avoid_collision_with_robots(self, target_position):
         """避免與其他機器人碰撞"""
+        # 強制轉換：確保target_position是2D座標
+        target_position = np.array(target_position).flatten()
+        
+        # 只取前兩個元素作為x, y座標
+        if len(target_position) >= 2:
+            target_position = target_position[:2]
+        else:
+            return target_position
+        
+        target_position = target_position.astype(np.float64)
+        
         other_positions = self.get_all_other_robots_positions()
         min_distance = self.robot_size * 2
         
         for other_pos in other_positions:
+            # 強制轉換：確保other_pos也是2D座標
+            other_pos = np.array(other_pos).flatten()
+            
+            # 只取前兩個元素作為x, y座標
+            if len(other_pos) >= 2:
+                other_pos = other_pos[:2]
+            else:
+                continue
+                
+            other_pos = other_pos.astype(np.float64)
+            
             distance = np.linalg.norm(target_position - other_pos)
             if distance < min_distance:
                 # 計算避開的方向
@@ -308,237 +302,32 @@ class Robot:
                     
         return target_position
 
-    # ================ 保持所有原有方法不變 ================
-    def begin(self):
-        """初始化並返回初始狀態"""
-        self.op_map = self.inverse_sensor(
-            self.robot_position, self.sensor_range, self.op_map, self.global_map)
-            
-        step_map = self.robot_model(
-            self.robot_position, self.robot_size, self.t, self.op_map)
-            
-        # map_local = self.local_map(
-        #     self.robot_position, step_map, self.map_size, self.sensor_range + self.local_size)
-        
-        resized_map = resize(step_map, (84, 84))
-        state = np.expand_dims(resized_map, axis=-1)
-        
-        if self.plot:
-            self.plot_env()
-            
-        return state
+    def get_other_robot_pos(self):
+        """獲取另一個機器人的位置（確保返回2D座標）"""
+        if hasattr(self, 'other_robot_position') and self.other_robot_position is not None:
+            pos = np.array(self.other_robot_position).flatten()
+            return pos[:2] if len(pos) >= 2 else pos
+        elif hasattr(self, 'other_robots') and self.other_robots:
+            pos = np.array(self.other_robots[0].robot_position).flatten()
+            return pos[:2] if len(pos) >= 2 else pos
+        return None
 
-    def move_to_frontier(self, target_frontier):
-        """移動到frontier，一次移動一步，直到到達目標或確定無法到達"""
-        # 保存當前目標
-        self.current_target_frontier = target_frontier
-        
-        # 如果沒有當前路徑或需要重新規劃路徑
-        if not hasattr(self, 'current_path') or self.current_path is None:
-            # 檢查目標是否可達（是否已知區域可達路徑）
-            known_path = self.astar_path(
-                self.op_map,
-                self.robot_position.astype(np.int32),
-                target_frontier.astype(np.int32),
-                safety_distance=ROBOT_CONFIG['safety_distance']
-            )
-            
-            if known_path is None:
-                # 無法找到只經過已知區域的路徑
-                self.current_path = None
-                return self.get_observation(), -1, True
-                
-            # 保存完整路徑
-            self.current_path = self.simplify_path(known_path)
-            self.current_path_index = 0
-            
-        # 執行一步移動
-        if self.current_path_index < len(self.current_path) - 1:
-            self.current_path_index += 1
-            next_position = np.array(self.current_path[self.current_path_index])
-            
-            # ================ 新增：避免與其他機器人碰撞 ================
-            next_position = self.avoid_collision_with_robots(next_position)
-            
-            self.robot_position = next_position
-            
-            # 更新傳感器觀測
-            self.op_map = self.inverse_sensor(
-                self.robot_position, self.sensor_range, self.op_map, self.global_map)
-                
-        # 檢查是否到達目標
-        distance_to_target = np.linalg.norm(self.robot_position - target_frontier)
-        if distance_to_target < self.movement_step * 2:
-            self.current_path = None
-            self.current_target_frontier = None
-            self.is_moving_to_target = False
-            
-        reward = self.calculate_reward()
-        return self.get_observation(), reward, False
+    def update_other_robot_pos(self, pos):
+        """更新另一個機器人的位置（確保是2D座標）"""
+        if hasattr(self, 'other_robot_position'):
+            pos = np.array(pos).flatten()
+            self.other_robot_position = pos[:2] if len(pos) >= 2 else pos
 
-    def check_completion(self):
-        """检查探索是否完成"""
-        exploration_ratio = np.sum(self.op_map == 255) / np.sum(self.global_map == 255)
-        
-        if exploration_ratio > self.finish_percent:
-            self.li_map += 1
-            if self.li_map >= self.map_number:
-                self.li_map = 0
-                return True, True  # 完成所有地图
-                
-            self.__init__(self.li_map, self.mode, self.plot)
-            return True, False  # 完成当前地图
-            
-        return False, False
-    
-    def reset(self):
-        """重置環境到新地圖，並確保所有機器人使用相同的地圖"""
-        # 在重置之前清理舊的可視化
-        if self.plot:
-            self.cleanup_visualization()
-
-        if self.is_primary:
-            self.li_map += 1
-            if self.li_map >= self.map_number:
-                self.li_map = 0
-                
-            # 主要機器人負責初始化新地圖
-            self.global_map, self.initial_positions = self.map_setup(
-                os.path.join(self.map_dir, self.map_list[self.li_map])
-            )
-            
-            # ================ 修改：支援多機器人重置 ================
-            # 確保有足夠的起始位置
-            if len(self.initial_positions) < self.num_robots:
-                self._generate_additional_positions()
-            
-            # 設置新的起始位置
-            self.robot_position = self.initial_positions[self.robot_id].astype(np.int64)
-            # 保持向後兼容
-            if self.num_robots >= 2:
-                self.other_robot_position = self.initial_positions[1 if self.robot_id == 0 else 0].astype(np.int64)
-            
-            # 重置地圖狀態
-            self.op_map = np.ones(self.global_map.shape) * 127
-            
-            # 重新初始化KD樹和空閒空間點
-            self.t = self.map_points(self.global_map)
-            self.free_tree = spatial.KDTree(self.free_points(self.global_map).tolist())
-        else:
-            # 使用共享環境的地圖和相關資源
-            self.li_map = self.shared_env.li_map
-            self.global_map = self.shared_env.global_map
-            self.op_map = self.shared_env.op_map
-            self.map_size = self.shared_env.map_size
-            
-            # ================ 修改：支援多機器人重置 ================
-            # 使用對應ID的起始位置
-            if hasattr(self.shared_env, 'initial_positions') and len(self.shared_env.initial_positions) > self.robot_id:
-                self.robot_position = self.shared_env.initial_positions[self.robot_id].astype(np.int64)
-            else:
-                # 向後兼容：交換位置
-                self.robot_position = self.shared_env.other_robot_position.copy()
-                
-            # 保持向後兼容：設置 other_robot_position
-            if hasattr(self.shared_env, 'robot_position'):
-                self.other_robot_position = self.shared_env.robot_position.copy()
-            
-            # 共享KD樹和空閒空間點
-            self.t = self.shared_env.t
-            self.free_tree = self.shared_env.free_tree
-        
-        # 重置路徑規劃和frontier相關的狀態
-        self.old_position = np.zeros([2])
-        self.old_op_map = np.empty([0])
-        self.current_target_frontier = None
-        self.is_moving_to_target = False
-        self.current_path = None
-        self.current_path_index = 0
-        self.steps = 0
-        
-        # 重置可視化相關的狀態
-        if self.plot:
-            self.initialize_visualization()
-        
-        # 執行初始觀測
-        return self.begin()
-
-    def check_done(self):
-        """检查是否需要结束当前回合"""
-        # 检查探索进度
-        exploration_ratio = np.sum(self.op_map == 255) / np.sum(self.global_map == 255)
-        if exploration_ratio > self.finish_percent:
-            return True
-            
-        # 检查是否还有可探索的frontiers
-        frontiers = self.get_frontiers()
-        if len(frontiers) == 0:
-            return True
-            
-        return False
-
-    def get_observation(self):
-        """获取当前观察状态"""
-        step_map = self.robot_model(
-            self.robot_position, self.robot_size, self.t, self.op_map)
-            
-        # 神經網路輸入只以機器人週邊為範圍    
-        # map_local = self.local_map(
-        #     self.robot_position, step_map, self.map_size, 
-        #     self.sensor_range + self.local_size)
-        
-        # 3. 調整大小為神經網絡輸入大小
-        resized_map = resize(step_map, (84, 84))
-        # resized_map = resize(map_local, (84, 84))
-        return np.expand_dims(resized_map, axis=-1)
-
-    def get_exploration_progress(self):
-        """获取探索进度"""
-        return np.sum(self.op_map == 255) / np.sum(self.global_map == 255)
-
-    def get_state_info(self):
-        """获取当前状态信息"""
-        return {
-            'position': self.robot_position.copy(),
-            'map': self.op_map.copy(),
-            'frontiers': self.get_frontiers(),
-            'target_frontier': self.current_target_frontier,
-            'exploration_progress': self.get_exploration_progress()
-        }
-
-    def set_state(self, state_info):
-        """设置状态"""
-        self.robot_position = state_info['position'].copy()
-        self.op_map = state_info['map'].copy()
-        self.current_target_frontier = state_info['target_frontier']
-        
-        if self.plot:
-            self.plot_env()
-            
     def get_normalized_position(self):
-        """獲取正規化後的機器人位置"""
-        return np.array([
-            self.robot_position[0] / float(self.map_size[1]),  # x座標正規化
-            self.robot_position[1] / float(self.map_size[0])   # y座標正規化
-        ])
-        
-    def initialize_visualization(self):
-        """初始化可視化相關的屬性"""
-        self.xPoint = np.array([self.robot_position[0]])
-        self.yPoint = np.array([self.robot_position[1]])
-        self.x2frontier = np.empty([0])
-        self.y2frontier = np.empty([0])
-        
-        # 為每個機器人創建獨立的 figure
-        self.fig = plt.figure(figsize=(10, 10))
-        # ================ 修改：支援多機器人視窗標題 ================
-        robot_name = f'Robot{self.robot_id}' if hasattr(self, 'robot_id') else ('Robot1' if self.is_primary else 'Robot2')
-        self.fig.canvas.manager.set_window_title(f'{robot_name} Exploration')
+        """獲取標準化位置（2D座標）"""
+        pos = np.array(self.robot_position).flatten()
+        pos_2d = pos[:2] if len(pos) >= 2 else pos
+        map_dims = np.array([float(self.map_size[1]), float(self.map_size[0])])
+        return pos_2d / map_dims
 
-    # ================ 保持向後兼容性屬性 ================
     @property
     def other_robot(self):
-        """向後兼容：獲取另一個機器人（只適用於兩機器人情況）"""
+        """向後兼容：獲取另一個機器人"""
         if hasattr(self, 'other_robots') and self.other_robots:
             return self.other_robots[0]
         elif hasattr(self, '_other_robot'):
@@ -549,40 +338,20 @@ class Robot:
     def other_robot(self, value):
         """向後兼容：設置另一個機器人"""
         self._other_robot = value
-
-    def get_other_robot_pos(self):
-        """獲取另一個機器人的位置"""
-        if hasattr(self, 'other_robot_position'):
-            return self.other_robot_position.copy()
-        elif hasattr(self, 'other_robots') and self.other_robots:
-            return self.other_robots[0].robot_position.copy()
-        return None
-
-    def update_other_robot_pos(self, pos):
-        """更新另一個機器人的位置"""
-        if hasattr(self, 'other_robot_position'):
-            self.other_robot_position = np.array(pos)
         
     def cleanup_visualization(self):
         """清理可視化資源"""
         if hasattr(self, 'fig'):
-            plt.close(self.fig)  # 關閉特定的figure
-            plt.clf()  # 清除當前figure
-            self.fig = None  # 重置figure引用
+            plt.close(self.fig)
+            plt.clf()
+            self.fig = None
 
-    # ================ 以下是所有原有方法，完全保持不變 ================
-    
     def robot_model(self, position, robot_size, points, map_glo):
         """機器人模型"""
         map_copy = map_glo.copy()
-        # robot_points = self.range_search(position, robot_size, points)
-        # for point in robot_points:
-        #     y, x = point[::-1].astype(int) #(x,y)轉（y,x）
-        #     if 0 <= y < map_copy.shape[0] and 0 <= x < map_copy.shape[1]:
-        #         map_copy[y, x] = 76 # 機器人位置標記為 76
         x, y = int(position[0]), int(position[1])
         if 0 <= x < map_copy.shape[1] and 0 <= y < map_copy.shape[0]:
-            map_copy[y, x] = 76 # 機器人位置標記為 76
+            map_copy[y, x] = 76
         return map_copy
 
     def range_search(self, position, r, points):
@@ -603,7 +372,7 @@ class Robot:
         if map_glo[end[1], end[0]] == 1:
             return np.array([end]).reshape(1, 2), True
         
-        # 簡化的線性插值檢查
+        # 路徑檢查
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         steps = max(abs(dx), abs(dy))
@@ -614,7 +383,6 @@ class Robot:
         x_step = dx / steps
         y_step = dy / steps
         
-        # 檢查幾個關鍵點
         check_points = np.linspace(0, steps, min(5, steps + 1))
         for t in check_points:
             x = int(start[0] + x_step * t)
@@ -629,13 +397,13 @@ class Robot:
         return np.array([[-1, -1]]).reshape(1, 2), False
 
     def inverse_sensor(self, robot_position, sensor_range, op_map, map_glo):
-        """反向傳感器模型"""
+        """逆向傳感器模型"""
         return inverse_sensor_model(
             int(robot_position[0]), int(robot_position[1]), 
             sensor_range, op_map, map_glo)
 
     def frontier(self, op_map, map_size, points):
-        """Frontier檢測"""
+        """前沿檢測"""
         y_len, x_len = map_size
         mapping = (op_map == 127).astype(int)
         
@@ -643,117 +411,591 @@ class Robot:
         
         fro_map = (
             mapping[2:, 1:x_len+1] +    # 下
-            mapping[:y_len, 1:x_len+1] + # 上
-            mapping[1:y_len+1, 2:] +     # 右
-            mapping[1:y_len+1, :x_len] + # 左
-            mapping[:y_len, 2:] +        # 右上
-            mapping[2:, :x_len] +        # 左下
-            mapping[2:, 2:] +            # 右下
-            mapping[:y_len, :x_len]      # 左上
+            mapping[:y_len, 1:x_len+1] +  # 上
+            mapping[1:y_len+1, 2:] +      # 右
+            mapping[1:y_len+1, :x_len] +  # 左
+            mapping[2:, 2:] +             # 右下
+            mapping[2:, :x_len] +         # 左下
+            mapping[:y_len, 2:] +         # 右上
+            mapping[:y_len, :x_len]       # 左上
         )
         
-        free_space = op_map.ravel(order='F') == 255
-        frontier_condition = (1 < fro_map.ravel(order='F')) & (fro_map.ravel(order='F') < 8)
-        valid_points = points[np.where(free_space & frontier_condition)[0]]
+        ind_map = np.logical_and(fro_map > 0, op_map == 255)
         
-        if len(valid_points) > 0:
-            selected_points = [valid_points[0]]
-            min_dist = ROBOT_CONFIG['min_frontier_dist']
-            
-            for point in valid_points[1:]:
-                distances = [np.linalg.norm(point - p) for p in selected_points]
-                if min(distances) > min_dist:
-                    selected_points.append(point)
-            
-            return np.array(selected_points).astype(int)
+        # 獲取frontier點
+        frontier_y, frontier_x = np.where(ind_map)
+        frontiers = np.column_stack((frontier_x, frontier_y))
         
-        return valid_points.astype(int)
+        # 聚類frontier點
+        if len(frontiers) > 0:
+            clustered_frontiers = self.cluster_frontiers(frontiers)
+            return clustered_frontiers
+        
+        return np.array([])
+
+    def cluster_frontiers(self, frontiers, min_cluster_size=5, cluster_radius=10):
+        """聚類frontier點"""
+        if len(frontiers) == 0:
+            return np.array([])
+        
+        clusters = []
+        used = np.zeros(len(frontiers), dtype=bool)
+        
+        for i, frontier in enumerate(frontiers):
+            if used[i]:
+                continue
+                
+            # 找到附近的點
+            distances = np.linalg.norm(frontiers - frontier, axis=1)
+            nearby = distances <= cluster_radius
+            cluster_points = frontiers[nearby]
+            
+            if len(cluster_points) >= min_cluster_size:
+                # 計算聚類中心
+                center = np.mean(cluster_points, axis=0)
+                clusters.append(center)
+                used[nearby] = True
+        
+        return np.array(clusters)
 
     def get_frontiers(self):
-        """取得當前可用的frontier點，考慮其他機器人的位置"""
-        if self.is_moving_to_target and self.current_target_frontier is not None:
-            return np.array([self.current_target_frontier])
-            
+        """獲取frontier點，確保返回2D座標"""
         frontiers = self.frontier(self.op_map, self.map_size, self.t)
-        if len(frontiers) == 0:
-            return np.zeros((0, 2))
-            
-        # 計算到自己的距離
-        distances = np.linalg.norm(frontiers - self.robot_position, axis=1)
         
-        # ================ 修改：考慮多機器人的距離 ================
-        # 獲取所有其他機器人的位置
-        other_positions = self.get_all_other_robots_positions()
-        
-        if other_positions:
-            # 計算到最近其他機器人的距離
-            other_distances = []
+        # 確保所有frontier點都是2D座標
+        if len(frontiers) > 0:
+            frontiers_2d = []
             for frontier in frontiers:
-                min_other_dist = min([np.linalg.norm(frontier - pos) for pos in other_positions])
-                other_distances.append(min_other_dist)
-            other_distances = np.array(other_distances)
+                frontier = np.array(frontier).flatten()
+                if len(frontier) >= 2:
+                    frontiers_2d.append(frontier[:2])
+            return np.array(frontiers_2d) if frontiers_2d else np.array([])
+        
+        return frontiers
+
+    def astar_path(self, op_map, start, goal, safety_distance=1):
+        """A*路徑規劃"""
+        # 確保start和goal是2D座標
+        start = np.array(start).flatten()[:2].astype(np.int32)
+        goal = np.array(goal).flatten()[:2].astype(np.int32)
+        
+        # 檢查起點和終點是否有效
+        if (start[0] < 0 or start[0] >= op_map.shape[1] or 
+            start[1] < 0 or start[1] >= op_map.shape[0] or
+            goal[0] < 0 or goal[0] >= op_map.shape[1] or 
+            goal[1] < 0 or goal[1] >= op_map.shape[0]):
+            return None
+        
+        # A*算法實現
+        open_set = []
+        heappush(open_set, (0, tuple(start)))
+        came_from = {}
+        g_score = {tuple(start): 0}
+        f_score = {tuple(start): np.linalg.norm(start - goal)}
+        
+        directions = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        
+        while open_set:
+            current = heappop(open_set)[1]
+            current_array = np.array(current)
             
-            # 根據距離和其他機器人的位置對frontier進行排序
-            # 優先選擇離自己近但離其他機器人遠的點
-            scores = distances - 0.5 * other_distances  # 可以調整權重
+            if np.linalg.norm(current_array - goal) < 2:
+                # 重建路徑
+                path = []
+                while current in came_from:
+                    path.append(current)
+                    current = came_from[current]
+                path.append(tuple(start))
+                return np.array(path[::-1])
+            
+            for dx, dy in directions:
+                neighbor = (current[0] + dx, current[1] + dy)
+                
+                if (neighbor[0] < 0 or neighbor[0] >= op_map.shape[1] or
+                    neighbor[1] < 0 or neighbor[1] >= op_map.shape[0]):
+                    continue
+                
+                # 檢查是否為已知的自由空間
+                if op_map[neighbor[1], neighbor[0]] != 255:
+                    continue
+                
+                tentative_g_score = g_score[current] + np.linalg.norm([dx, dy])
+                
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + np.linalg.norm(np.array(neighbor) - goal)
+                    heappush(open_set, (f_score[neighbor], neighbor))
+        
+        return None
+
+    def simplify_path(self, path, threshold=2.0):
+        """簡化路徑"""
+        if path is None or len(path) <= 2:
+            return path
+        
+        # 確保路徑點都是2D
+        path_2d = []
+        for point in path:
+            point = np.array(point).flatten()
+            if len(point) >= 2:
+                path_2d.append(point[:2])
+        
+        if len(path_2d) <= 2:
+            return np.array(path_2d)
+        
+        path = np.array(path_2d)
+        
+        def point_line_distance(point, line_start, line_end):
+            line_vec = line_end - line_start
+            point_vec = point - line_start
+            line_len = np.linalg.norm(line_vec)
+            if line_len == 0:
+                return np.linalg.norm(point_vec)
+            line_unit_vec = line_vec / line_len
+            projection_length = np.dot(point_vec, line_unit_vec)
+            projection_length = max(min(projection_length, line_len), 0)
+            return np.linalg.norm(point_vec - projection_length * line_unit_vec)
+        
+        def simplify_recursive(points, epsilon, mask):
+            dmax = 0
+            index = 0
+            end = len(points) - 1
+            
+            for i in range(1, end):
+                d = point_line_distance(points[i], points[0], points[end])
+                if d > dmax:
+                    index = i
+                    dmax = d
+            
+            if dmax > epsilon:
+                mask1 = mask.copy()
+                mask2 = mask.copy()
+                simplify_recursive(points[:index + 1], epsilon, mask1)
+                simplify_recursive(points[index:], epsilon, mask2)
+                
+                for i in range(len(mask)):
+                    mask[i] = mask1[i] if i <= index else mask2[i - index]
+            else:
+                for i in range(1, end):
+                    mask[i] = False
+        
+        mask = np.ones(len(path), dtype=bool)
+        simplify_recursive(path, threshold, mask)
+        
+        return path[mask]
+
+    def move_to_frontier(self, target_frontier):
+        """移動到frontier，一次移動一步，直到到達目標或確定無法到達"""
+        # 確保target_frontier是2D座標
+        target_frontier = np.array(target_frontier).flatten()
+        if len(target_frontier) >= 2:
+            target_frontier = target_frontier[:2]
         else:
-            # 向後兼容：只考慮到自己的距離
-            scores = distances
+            return self.get_observation(), -1, True
+        target_frontier = target_frontier.astype(np.float64)
+        
+        # 保存當前目標
+        self.current_target_frontier = target_frontier
+        
+        # 如果沒有當前路徑或需要重新規劃路徑
+        if not hasattr(self, 'current_path') or self.current_path is None:
+            # 檢查目標是否可達
+            known_path = self.astar_path(
+                self.op_map,
+                self.robot_position.astype(np.int32),
+                target_frontier.astype(np.int32),
+                safety_distance=ROBOT_CONFIG['safety_distance']
+            )
             
-        sorted_indices = np.argsort(scores)
-        return frontiers[sorted_indices]
+            if known_path is None:
+                # 無法找到路徑
+                self.current_path = None
+                return self.get_observation(), -1, True
+                
+            # 保存路徑
+            self.current_path = self.simplify_path(known_path)
+            self.current_path_index = 0
+            
+        # 執行一步移動
+        if self.current_path_index < len(self.current_path) - 1:
+            self.current_path_index += 1
+            next_position = np.array(self.current_path[self.current_path_index])
+            
+            # 修復：確保next_position是2D座標
+            next_position = np.array(next_position).flatten()
+            if len(next_position) >= 2:
+                next_position = next_position[:2]
+            else:
+                return self.get_observation(), -1, True
+            next_position = next_position.astype(np.float64)
+            
+            # 避免與其他機器人碰撞
+            next_position = self.avoid_collision_with_robots(next_position)
+            
+            self.robot_position = next_position
+            
+            # 更新傳感器觀測
+            self.op_map = self.inverse_sensor(
+                self.robot_position, self.sensor_range, self.op_map, self.global_map)
+                
+        # 檢查是否到達目標
+        distance_to_target = np.linalg.norm(self.robot_position - target_frontier)
+        if distance_to_target < self.movement_step * 2:
+            self.current_path = None
+            self.current_target_frontier = None
+            self.is_moving_to_target = False
+            
+        reward = self.calculate_reward()
+        return self.get_observation(), reward, False
+
+    def execute_movement(self, move_vector):
+        """移動"""
+        # 確保move_vector是2D
+        move_vector = np.array(move_vector).flatten()
+        if len(move_vector) >= 2:
+            move_vector = move_vector[:2]
+        else:
+            return self.get_observation(), REWARD_CONFIG['collision_penalty'], True
+        
+        old_position = self.robot_position.copy()
+        old_op_map = self.op_map.copy()
+        
+        # 更新位置
+        new_position = self.robot_position + move_vector
+        self.robot_position = np.round(new_position).astype(np.int64)
+        
+        # 確保robot_position是2D
+        if len(self.robot_position) > 2:
+            self.robot_position = self.robot_position[:2]
+        
+        # 邊界檢查
+        self.robot_position[0] = np.clip(self.robot_position[0], 0, self.map_size[1]-1)
+        self.robot_position[1] = np.clip(self.robot_position[1], 0, self.map_size[0]-1)
+        
+        # 碰撞檢查
+        collision_points, collision_index = self.fast_collision_check(
+            old_position, self.robot_position, self.map_size, self.global_map)
+        
+        if collision_index:
+            self.robot_position = self.nearest_free(self.free_tree, collision_points)
+            reward = REWARD_CONFIG['collision_penalty']
+            done = True
+        else:
+            # 更新共享地圖
+            self.op_map = self.inverse_sensor(
+                self.robot_position, self.sensor_range, 
+                self.op_map, self.global_map
+            )
+            
+            # 避免路徑重疊懲罰
+            other_positions = self.get_all_other_robots_positions()
+            path_overlap_penalty = 0.0
+            for other_pos in other_positions:
+                distance_to_other = np.linalg.norm(self.robot_position - other_pos)
+                if distance_to_other < ROBOT_CONFIG['sensor_range'] * 2:
+                    path_overlap_penalty -= 0.1
+            
+            reward = self.calculate_fast_reward(old_op_map, self.op_map, move_vector) + path_overlap_penalty
+            done = False
+        
+        self.steps += 1
+        if self.plot and self.steps % ROBOT_CONFIG.get('plot_interval', 10) == 0:
+            self.xPoint = np.append(self.xPoint, self.robot_position[0])
+            self.yPoint = np.append(self.yPoint, self.robot_position[1])
+            self.plot_env()
+        
+        return self.get_observation(), reward, done
+
+    def calculate_fast_reward(self, old_op_map, new_op_map, move_vector):
+        """快速獎勵計算"""
+        # 確保輸入地圖的形狀一致
+        if old_op_map.shape != new_op_map.shape:
+            # 如果舊地圖無效，使用新地圖作為基準
+            old_op_map = np.ones_like(new_op_map) * 127
+        
+        # 1. 探索獎勵
+        new_explored = np.sum(new_op_map == 255) - np.sum(old_op_map == 255)
+        exploration_reward = new_explored / 14000.0 * REWARD_CONFIG.get('exploration_weight', 1.0)
+        
+        # 2. 移動效率獎勵
+        movement_length = np.linalg.norm(move_vector)
+        efficiency_reward = (0 if new_explored > 0 
+                            else REWARD_CONFIG.get('movement_penalty', 0.1) * movement_length)
+
+        # 3. 協作獎勵
+        cooperation_reward = 0.0
+        if hasattr(self, 'other_robot') and self.other_robot is not None:
+            if hasattr(self.other_robot, 'op_map'):
+                try:
+                    other_explored = np.sum(self.other_robot.op_map == 255)
+                    total_explored = np.sum(new_op_map == 255)
+                    if total_explored > 0:
+                        cooperation_reward = 0.1 * (other_explored / total_explored)
+                except:
+                    cooperation_reward = 0.0
+        
+        return exploration_reward - efficiency_reward + cooperation_reward
+
+    def calculate_reward(self):
+        """計算獎勵，確保位置處理正確"""
+        # 確保當前位置是2D
+        current_pos = np.array(self.robot_position).flatten()[:2]
+        
+        # 基本探索獎勵
+        new_explored = np.sum(self.op_map == 255)
+        
+        # 檢查old_op_map是否有效
+        if hasattr(self, 'old_op_map') and len(self.old_op_map) > 0 and self.old_op_map.shape == self.op_map.shape:
+            old_explored = np.sum(self.old_op_map == 255)
+            exploration_reward = (new_explored - old_explored) / 1000.0
+        else:
+            # 如果old_op_map無效，只計算當前探索量
+            exploration_reward = new_explored / 10000.0
+        
+        # 移動效率獎勵
+        movement_penalty = 0
+        if hasattr(self, 'old_position') and len(self.old_position) >= 2:
+            old_pos = np.array(self.old_position).flatten()[:2]
+            if len(old_pos) == 2:
+                movement_distance = np.linalg.norm(current_pos - old_pos)
+                movement_penalty = -0.01 * movement_distance
+        
+        # 與其他機器人的距離獎勵/懲罰
+        distance_penalty = 0
+        other_positions = self.get_all_other_robots_positions()
+        for other_pos in other_positions:
+            distance = np.linalg.norm(current_pos - other_pos)
+            if distance < self.robot_size * 3:
+                distance_penalty -= 0.1  # 太近懲罰
+            elif distance > self.sensor_range * 3:
+                distance_penalty -= 0.05  # 太遠懲罰
+        
+        total_reward = exploration_reward + movement_penalty + distance_penalty
+        
+        # 更新old_op_map以供下次使用
+        self.old_op_map = self.op_map.copy()
+        self.old_position = current_pos.copy()
+        
+        return total_reward
+
+    def check_completion(self):
+        """檢查探索是否完成"""
+        exploration_ratio = np.sum(self.op_map == 255) / np.sum(self.global_map == 255)
+        
+        if exploration_ratio > self.finish_percent:
+            self.li_map += 1
+            if self.li_map >= self.map_number:
+                self.li_map = 0
+                return True, True  # 完成所有地圖
+                
+            self.__init__(self.li_map, self.mode, self.plot)
+            return True, False  # 完成當前地圖
+            
+        return False, False
+    
+    def check_done(self):
+        """檢查是否需要結束當前回合"""
+        # 檢查探索進度
+        exploration_ratio = np.sum(self.op_map == 255) / np.sum(self.global_map == 255)
+        if exploration_ratio > self.finish_percent:
+            return True
+            
+        # 檢查是否還有可探索的frontiers
+        frontiers = self.get_frontiers()
+        if len(frontiers) == 0:
+            return True
+            
+        return False
+
+    def reset(self):
+        """重置環境到新地圖，並確保所有機器人使用相同的地圖"""
+        # 在重置之前清理舊的可視化
+        if self.plot:
+            self.cleanup_visualization()
+
+        if self.is_primary:
+            self.li_map += 1
+            if self.li_map >= self.map_number:
+                self.li_map = 0
+                
+            # 主要機器人負責初始化新地圖
+            self.global_map, self.initial_positions = self.map_setup(
+                os.path.join(self.map_dir, self.map_list[self.li_map])
+            )
+            
+            # 確保有足夠的起始位置
+            if len(self.initial_positions) < self.num_robots:
+                self._generate_additional_positions()
+            
+            # 設置新的起始位置（確保是2D）
+            pos = np.array(self.initial_positions[self.robot_id]).flatten()
+            self.robot_position = pos[:2].astype(np.int64)
+            
+            # 保持向後兼容
+            if self.num_robots >= 2:
+                other_id = 1 if self.robot_id == 0 else 0
+                other_pos = np.array(self.initial_positions[other_id]).flatten()
+                self.other_robot_position = other_pos[:2].astype(np.int64)
+            
+            # 重置地圖狀態
+            self.op_map = np.ones(self.global_map.shape) * 127
+            
+            # 重新初始化KD樹和空閒空間點
+            self.t = self.map_points(self.global_map)
+            self.free_tree = spatial.KDTree(self.free_points(self.global_map).tolist())
+        else:
+            # 使用共享環境的地圖和相關資源
+            self.li_map = self.shared_env.li_map
+            self.global_map = self.shared_env.global_map
+            self.op_map = self.shared_env.op_map
+            self.map_size = self.shared_env.map_size
+            
+            # 使用不同的起始位置（確保是2D）
+            if hasattr(self.shared_env, 'initial_positions') and len(self.shared_env.initial_positions) > self.robot_id:
+                pos = np.array(self.shared_env.initial_positions[self.robot_id]).flatten()
+                self.robot_position = pos[:2].astype(np.int64)
+            else:
+                shared_pos = np.array(self.shared_env.other_robot_position).flatten()
+                self.robot_position = shared_pos[:2].copy()
+            
+            self_pos = np.array(self.shared_env.robot_position).flatten()
+            self.other_robot_position = self_pos[:2].copy()
+            
+            # 共享KD樹和空閒空間點
+            self.t = self.shared_env.t
+            self.free_tree = self.shared_env.free_tree
+        
+        # 重置路徑規劃和frontier相關的狀態
+        self.old_position = np.zeros(2, dtype=np.float64)
+        self.old_op_map = None  # 將在begin()方法中正確初始化
+        self.current_target_frontier = None
+        self.is_moving_to_target = False
+        self.current_path = None
+        self.current_path_index = 0
+        self.steps = 0
+        
+        # 重置可視化相關的狀態
+        if self.plot:
+            self.initialize_visualization()
+        
+        # 執行初始觀測
+        return self.begin()
+
+    def begin(self):
+        """初始化並返回初始狀態"""
+        self.op_map = self.inverse_sensor(
+            self.robot_position, self.sensor_range, self.op_map, self.global_map)
+        
+        # 初始化old_op_map和old_position
+        self.old_op_map = self.op_map.copy()
+        self.old_position = self.robot_position.copy()
+            
+        step_map = self.robot_model(
+            self.robot_position, self.robot_size, self.t, self.op_map)
+            
+        resized_map = resize(step_map, (84, 84))
+        state = np.expand_dims(resized_map, axis=-1)
+        
+        if self.plot:
+            self.plot_env()
+            
+        return state
+
+    def get_observation(self):
+        """獲取當前觀察狀態"""
+        step_map = self.robot_model(
+            self.robot_position, self.robot_size, self.t, self.op_map)
+            
+        resized_map = resize(step_map, (84, 84))
+        state = np.expand_dims(resized_map, axis=-1)
+        
+        return state
+
+    def map_setup(self, map_dir):
+        """地圖設置"""
+        # 載入地圖
+        map_img = io.imread(map_dir, as_gray=True)
+        binary_map = (map_img > 0.5).astype(np.uint8)
+        
+        # 找到自由空間
+        free_space = (binary_map == 1)
+        free_points = np.column_stack(np.where(free_space))
+        
+        # 隨機選擇起始位置
+        num_start_positions = max(2, self.num_robots)
+        if len(free_points) < num_start_positions:
+            raise ValueError("Not enough free space for robots")
+        
+        # 選擇起始位置
+        indices = np.random.choice(len(free_points), size=num_start_positions, replace=False)
+        start_positions = free_points[indices]
+        
+        # 轉換為x,y格式
+        start_positions = start_positions[:, [1, 0]]  # y,x -> x,y
+        
+        return binary_map, start_positions
+
+    def map_points(self, map_glo):
+        """獲取地圖點"""
+        map_x, map_y = np.meshgrid(np.arange(map_glo.shape[1]), np.arange(map_glo.shape[0]))
+        return np.column_stack((map_x.ravel(), map_y.ravel()))
+
+    def free_points(self, map_glo):
+        """獲取自由空間點"""
+        free_y, free_x = np.where(map_glo == 1)
+        return np.column_stack((free_x, free_y))
+
+    def nearest_free(self, free_tree, collision_points):
+        """找到最近的自由空間點"""
+        if len(collision_points) == 0:
+            return self.robot_position
+        
+        collision_point = collision_points[0]
+        _, nearest_idx = free_tree.query(collision_point)
+        return free_tree.data[nearest_idx]
+
+    def initialize_visualization(self):
+        """初始化可視化"""
+        if not self.plot:
+            return
+        
+        self.fig, self.ax = plt.subplots(figsize=(10, 10))
+        self.xPoint = np.array([])
+        self.yPoint = np.array([])
 
     def plot_env(self):
-        """繪製環境和機器人"""
-        # 使用各自的 figure
-        plt.figure(self.fig.number)
-        plt.clf()  # 清除當前 figure
+        """繪製環境"""
+        if not self.plot or not hasattr(self, 'fig'):
+            return
         
-        # 1. 繪製基礎地圖
-        plt.imshow(self.op_map, cmap='gray')
-        plt.axis((0, self.map_size[1], self.map_size[0], 0))
+        self.ax.clear()
         
-        # ================ 修改：支援多機器人顏色 ================
-        # 為不同機器人使用不同顏色
-        colors = ['#800080', '#FFA500', '#00FF00', '#FF0000', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF']
-        robot_color = colors[self.robot_id % len(colors)] if hasattr(self, 'robot_id') else ('#800080' if self.is_primary else '#FFA500')
-        robot_name = f'Robot{self.robot_id}' if hasattr(self, 'robot_id') else ('Robot1' if self.is_primary else 'Robot2')
+        # 繪製地圖
+        self.ax.imshow(self.op_map, cmap='gray', origin='lower')
         
-        # 2. 繪製路徑軌跡
-        if len(self.xPoint) > 1:  # 確保有超過一個點才畫線
-            plt.plot(self.xPoint, self.yPoint, color=robot_color, 
-                    linewidth=2, label=f'{robot_name} Path')
+        # 繪製機器人位置
+        self.ax.plot(self.robot_position[0], self.robot_position[1], 'ro', markersize=10, label='Robot')
         
-        # 3. 繪製 frontier 點
+        # 繪製軌跡
+        if len(self.xPoint) > 0:
+            self.ax.plot(self.xPoint, self.yPoint, 'r-', alpha=0.7, label='Path')
+        
+        # 繪製其他機器人
+        if hasattr(self, 'other_robot_position') and self.other_robot_position is not None:
+            self.ax.plot(self.other_robot_position[0], self.other_robot_position[1], 'bo', markersize=10, label='Other Robot')
+        
+        # 繪製frontiers
         frontiers = self.get_frontiers()
         if len(frontiers) > 0:
-            plt.scatter(frontiers[:, 0], frontiers[:, 1], 
-                    c='red', marker='*', s=100, label='Frontiers')
+            self.ax.scatter(frontiers[:, 0], frontiers[:, 1], c='yellow', s=20, alpha=0.7, label='Frontiers')
         
-        # 4. 繪製當前機器人位置
-        plt.scatter(self.robot_position[0], self.robot_position[1], 
-                   c=robot_color, marker='o', s=200, label=robot_name)
-        
-        # ================ 新增：繪製其他機器人位置 ================
-        other_positions = self.get_all_other_robots_positions()
-        for i, pos in enumerate(other_positions):
-            other_robot_id = i if i < self.robot_id else i + 1
-            other_color = colors[other_robot_id % len(colors)]
-            other_name = f'Robot{other_robot_id}'
-            plt.scatter(pos[0], pos[1], c=other_color, marker='s', s=150, 
-                       label=other_name, alpha=0.7)
-        
-        # 5. 繪製目標frontier
-        if self.current_target_frontier is not None:
-            plt.scatter(self.current_target_frontier[0], self.current_target_frontier[1], 
-                       c='yellow', marker='x', s=200, label='Target')
-        
-        plt.legend()
-        plt.title(f'{robot_name} - Exploration Progress: {self.get_exploration_progress():.2%}')
-        plt.pause(0.01)
+        self.ax.legend()
+        self.ax.set_title(f'Robot {self.robot_id} - Step {self.steps}')
+        plt.pause(0.001)
 
-    # ================ 以下為路徑規劃相關方法，保持不變 ================
-    
+
+
     def inflate_map(self, binary_map):
         """膨脹地圖以創建代價地圖"""
         obstacle_map = (binary_map == 1)
