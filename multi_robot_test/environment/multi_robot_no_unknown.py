@@ -16,7 +16,7 @@ import heapq
 
 class Robot:
     @classmethod
-    def create_shared_robots(cls, index_map, num_robots=2, train=True, plot=True):
+    def create_shared_robots(cls, index_map, num_robots=5, train=True, plot=True):
         """創建共享環境的機器人實例
         
         Args:

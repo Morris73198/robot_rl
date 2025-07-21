@@ -192,15 +192,17 @@ class SpatialAttention(layers.Layer):
         return output
 
 class MultiRobotNetworkModel:
-    def __init__(self, input_shape=(84, 84, 1), max_frontiers=50):
+    def __init__(self, input_shape=(84, 84, 1), max_frontiers=50, max_robots=10):
         """初始化多機器人網路模型
         
         Args:
             input_shape: 輸入地圖的形狀，默認(84, 84, 1)
             max_frontiers: 最大frontier點數量，默認50
+            max_robots: 支援的最大機器人數量，默認10
         """
         self.input_shape = input_shape
         self.max_frontiers = max_frontiers
+        self.max_robots = max_robots
         self.d_model = 256  # 模型維度
         self.num_heads = 8  # 注意力頭數
         self.dff = 512  # 前饋網路維度
@@ -209,261 +211,230 @@ class MultiRobotNetworkModel:
         # 構建並編譯模型
         self.model = self._build_model()
         self.target_model = self._build_model()
-        self.target_model.set_weights(self.model.get_weights())
         
-    def pad_frontiers(self, frontiers):
-        """Pad frontier points to fixed length and normalize coordinates"""
-        padded = np.zeros((self.max_frontiers, 2))
+        # 初始化目標網路權重
+        self.update_target_model()
         
-        if len(frontiers) > 0:
-            frontiers = np.array(frontiers)
-            
-            map_width = self.input_shape[1]
-            map_height = self.input_shape[0]
-            
-            normalized_frontiers = frontiers.copy()
-            normalized_frontiers[:, 0] = frontiers[:, 0] / float(map_width)
-            normalized_frontiers[:, 1] = frontiers[:, 1] / float(map_height)
-            
-            n_frontiers = min(len(frontiers), self.max_frontiers)
-            padded[:n_frontiers] = normalized_frontiers[:n_frontiers]
-        
-        return padded
-        
-    def _build_perception_module(self, inputs):
+    def _build_perception_module(self, map_input):
         """構建感知模塊"""
-        conv_configs = [
-            {'filters': 32, 'kernel_size': 3, 'strides': 1},
-            {'filters': 32, 'kernel_size': 5, 'strides': 1},
-            {'filters': 32, 'kernel_size': 7, 'strides': 1}
-        ]
+        # CNN特徵提取
+        x = layers.Conv2D(32, (8, 8), strides=4, activation='relu')(map_input)
+        x = layers.Conv2D(64, (4, 4), strides=2, activation='relu')(x)
+        x = layers.Conv2D(128, (3, 3), strides=1, activation='relu')(x)
         
-        features = []
-        for config in conv_configs:
-            x = layers.Conv2D(
-                filters=config['filters'],
-                kernel_size=config['kernel_size'],
-                strides=config['strides'],
-                padding='same',
-                kernel_regularizer=regularizers.l2(0.01)
-            )(inputs)
-            x = layers.BatchNormalization()(x)
-            x = layers.Activation('relu')(x)
-            
-            x = SpatialAttention()(x)
-            
-            x = layers.Conv2D(
-                filters=config['filters'],
-                kernel_size=config['kernel_size'],
-                strides=config['strides'],
-                padding='same',
-                kernel_regularizer=regularizers.l2(0.01)
-            )(x)
-            x = layers.BatchNormalization()(x)
-            x = layers.Activation('relu')(x)
-            features.append(x)
-            
-        concat_features = layers.Concatenate()(features)
-        x = layers.Conv2D(64, 1)(concat_features)
-        x = layers.BatchNormalization()(x)
-        x = layers.Activation('relu')(x)
-        x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+        # 應用空間注意力
+        x = SpatialAttention()(x)
         
         return x
-
-    def _build_coordination_module(self, robot1_state, robot2_state):
-        """構建協調模塊"""
-        robot1_expanded = layers.Lambda(
-            lambda x: tf.expand_dims(x, axis=1)
-        )(robot1_state)
-        robot2_expanded = layers.Lambda(
-            lambda x: tf.expand_dims(x, axis=1)
-        )(robot2_state)
         
-        combined_states = layers.Concatenate(axis=1)([
-            robot1_expanded, robot2_expanded
-        ])
+    def _build_robot_state_module(self, robots_poses, robots_targets):
+        """構建機器人狀態編碼模塊
         
-        attention = MultiHeadAttention(
+        Args:
+            robots_poses: 所有機器人位置 [batch, max_robots, 2]
+            robots_targets: 所有機器人目標 [batch, max_robots, 2]
+        """
+        # 將位置和目標連接
+        robot_states = layers.Concatenate(axis=-1)([robots_poses, robots_targets])  # [batch, max_robots, 4]
+        
+        # 編碼每個機器人的狀態
+        robot_features = layers.Dense(
+            self.d_model,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(0.01),
+            name='robot_state_encoder'
+        )(robot_states)
+        
+        # 添加位置編碼
+        robot_features = PositionalEncoding(self.max_robots, self.d_model)(robot_features)
+        
+        return robot_features
+        
+    def _build_multi_robot_coordination_module(self, robot_features):
+        """構建多機器人協調模塊
+        
+        Args:
+            robot_features: 機器人特徵 [batch, max_robots, d_model]
+        """
+        # 多頭自注意力機制 - 讓機器人之間可以相互感知和協調
+        attention_output = MultiHeadAttention(
             d_model=self.d_model,
             num_heads=self.num_heads,
-            dropout_rate=self.dropout_rate
-        )([combined_states, combined_states, combined_states])
+            dropout_rate=self.dropout_rate,
+            name='robot_coordination_attention'
+        )([robot_features, robot_features, robot_features])
         
-        ffn = FeedForward(
+        # 前饋神經網路
+        coordinated_features = FeedForward(
             d_model=self.d_model,
             dff=self.dff,
-            dropout_rate=self.dropout_rate
-        )(attention)
+            dropout_rate=self.dropout_rate,
+            name='robot_coordination_ffn'
+        )(attention_output)
         
-        robot1_coord = layers.Lambda(lambda x: x[:, 0, :])(ffn)
-        robot2_coord = layers.Lambda(lambda x: x[:, 1, :])(ffn)
+        return coordinated_features
         
-        return robot1_coord, robot2_coord
+    def _build_frontier_evaluation_module(self, frontier_input, robot_features):
+        """構建frontier評估模塊
         
-    def _build_frontier_module(self, frontier_input, robot_state):
-        """構建frontier評估模塊"""
-        x = layers.Dense(64, activation='relu')(frontier_input)
-        x = layers.Dropout(self.dropout_rate)(x)
+        Args:
+            frontier_input: frontier點座標 [batch, max_frontiers, 2]
+            robot_features: 協調後的機器人特徵 [batch, max_robots, d_model]
+        """
+        # 編碼frontier特徵
+        frontier_features = layers.Dense(64, activation='relu')(frontier_input)
+        frontier_features = layers.Dropout(self.dropout_rate)(frontier_features)
+        frontier_features = PositionalEncoding(self.max_frontiers, 64)(frontier_features)
         
-        x = PositionalEncoding(self.max_frontiers, 64)(x)
+        # 擴展機器人特徵以匹配frontier維度進行交互
+        # robot_features: [batch, max_robots, d_model]
+        # 我們需要為每個機器人和每個frontier計算交互特徵
         
-        attention = MultiHeadAttention(
-            d_model=64,
-            num_heads=4,
-            dropout_rate=self.dropout_rate
-        )([x, x, x])
+        # 將機器人特徵投影到合適的維度
+        robot_projected = layers.Dense(64, activation='relu')(robot_features)  # [batch, max_robots, 64]
         
-        robot_state_expanded = layers.RepeatVector(self.max_frontiers)(robot_state)
-        combined = layers.Concatenate()([attention, robot_state_expanded])
+        return frontier_features, robot_projected
         
-        x = layers.Bidirectional(layers.LSTM(
-            32, 
-            return_sequences=True,
-            kernel_regularizer=regularizers.l2(0.01)
-        ))(combined)
+    def _build_dueling_output_head(self, combined_features, robot_id):
+        """為每個機器人構建Dueling DQN輸出頭
         
-        return x
+        Args:
+            combined_features: 結合的特徵
+            robot_id: 機器人ID用於命名
+        """
+        # 共享特徵層
+        shared = layers.Dense(512, activation='relu')(combined_features)
+        shared = layers.Dropout(self.dropout_rate)(shared)
+        shared = layers.Dense(256, activation='relu')(shared)
+        shared = layers.Dropout(self.dropout_rate)(shared)
+        
+        # 價值流 (Value Stream) - 估計狀態價值
+        value_stream = layers.Dense(128, activation='relu')(shared)
+        value = layers.Dense(1, name=f'robot{robot_id}_value')(value_stream)
+        
+        # 優勢流 (Advantage Stream) - 估計動作優勢
+        advantage_stream = layers.Dense(128, activation='relu')(shared)
+        advantage = layers.Dense(
+            self.max_frontiers, 
+            name=f'robot{robot_id}_advantage'
+        )(advantage_stream)
+        
+        # Dueling架構：Q(s,a) = V(s) + A(s,a) - mean(A(s,:))
+        mean_advantage = layers.Lambda(
+            lambda x: tf.reduce_mean(x, axis=1, keepdims=True)
+        )(advantage)
+        
+        q_values = layers.Add(name=f'robot{robot_id}')([
+            value,
+            layers.Subtract()([advantage, mean_advantage])
+        ])
+        
+        return q_values
 
     def _build_model(self):
-        """構建完整的模型，使用Dueling DQN架構"""
-        # 輸入層
+        """構建完整的多機器人Dueling DQN模型"""
+        # 輸入層定義
         map_input = layers.Input(shape=self.input_shape, name='map_input')
-        frontier_input = layers.Input(
-            shape=(self.max_frontiers, 2),
-            name='frontier_input'
-        )
-        robot1_pos = layers.Input(shape=(2,), name='robot1_pos_input')
-        robot2_pos = layers.Input(shape=(2,), name='robot2_pos_input')
-        robot1_target = layers.Input(shape=(2,), name='robot1_target_input')
-        robot2_target = layers.Input(shape=(2,), name='robot2_target_input')
+        frontier_input = layers.Input(shape=(self.max_frontiers, 2), name='frontier_input')
         
-        # 1. 地圖感知處理
+        # 動態機器人狀態輸入 - 使用單一輸入來接收所有機器人的pose和target
+        robots_poses = layers.Input(shape=(self.max_robots, 2), name='robots_poses_input')
+        robots_targets = layers.Input(shape=(self.max_robots, 2), name='robots_targets_input')
+        
+        # 地圖感知處理
         map_features = self._build_perception_module(map_input)
         map_features_flat = layers.Flatten()(map_features)
         
-        # 2. 機器人狀態編碼
-        robot1_state = layers.Concatenate()([robot1_pos, robot1_target])
-        robot2_state = layers.Concatenate()([robot2_pos, robot2_target])
+        # 機器人狀態編碼和協調
+        robot_features = self._build_robot_state_module(robots_poses, robots_targets)
+        coordinated_robot_features = self._build_multi_robot_coordination_module(robot_features)
         
-        robot1_features = layers.Dense(
-            self.d_model,
-            activation='relu',
-            kernel_regularizer=regularizers.l2(0.01)
-        )(robot1_state)
-        robot2_features = layers.Dense(
-            self.d_model,
-            activation='relu',
-            kernel_regularizer=regularizers.l2(0.01)
-        )(robot2_state)
+        # Frontier評估
+        frontier_features, robot_projected = self._build_frontier_evaluation_module(
+            frontier_input, coordinated_robot_features)
         
-        # 3. 協調模塊
-        robot1_coord, robot2_coord = self._build_coordination_module(
-            robot1_features, robot2_features
-        )
+        # 為每個機器人構建輸出頭
+        outputs = {}
         
-        # 4. Frontier評估
-        robot1_frontier = self._build_frontier_module(frontier_input, robot1_coord)
-        robot2_frontier = self._build_frontier_module(frontier_input, robot2_coord)
-        
-        # 5. Dueling DQN架構
-        def build_dueling_streams(features, name_prefix):
-            # 共享特徵層
-            shared = layers.Dense(512, activation='relu')(features)
-            shared = layers.Dropout(self.dropout_rate)(shared)
-            shared = layers.Dense(256, activation='relu')(shared)
-            shared = layers.Dropout(self.dropout_rate)(shared)
+        for robot_id in range(self.max_robots):
+            # 提取該機器人的協調特徵
+            robot_coord_features = layers.Lambda(
+                lambda x, i=robot_id: x[:, i, :],
+                name=f'robot{robot_id}_coord_extract'
+            )(coordinated_robot_features)
             
-            # 價值流 (Value Stream)
-            value_stream = layers.Dense(128, activation='relu')(shared)
-            value = layers.Dense(1, name=f'{name_prefix}_value')(value_stream)
+            # 結合地圖特徵、機器人協調特徵和frontier特徵
+            # 使用注意力機制來融合frontier和機器人特徵
+            robot_frontier_attention = layers.MultiHeadAttention(
+                num_heads=4, 
+                key_dim=16,
+                name=f'robot{robot_id}_frontier_attention'
+            )(
+                query=layers.RepeatVector(self.max_frontiers)(robot_coord_features),
+                value=frontier_features,
+                key=frontier_features
+            )
             
-            # 優勢流 (Advantage Stream)
-            advantage_stream = layers.Dense(128, activation='relu')(shared)
-            advantage = layers.Dense(
-                self.max_frontiers, 
-                name=f'{name_prefix}_advantage'
-            )(advantage_stream)
+            # 平均池化注意力輸出
+            robot_frontier_features = layers.GlobalAveragePooling1D()(robot_frontier_attention)
             
-            # 組合價值和優勢
-            mean_advantage = layers.Lambda(
-                lambda x: tf.reduce_mean(x, axis=1, keepdims=True)
-            )(advantage)
-            
-            q_values = layers.Add(name=name_prefix)([
-                value,
-                layers.Subtract()([advantage, mean_advantage])
+            # 結合所有特徵
+            combined_features = layers.Concatenate()([
+                robot_coord_features,
+                robot_frontier_features,
+                map_features_flat
             ])
             
-            return q_values
+            # 生成該機器人的Q值
+            robot_output = self._build_dueling_output_head(combined_features, robot_id)
+            outputs[f'robot{robot_id}'] = robot_output
         
-        # Robot 1的Dueling網絡
-        robot1_features = layers.Concatenate()([
-            layers.Flatten()(robot1_frontier),
-            robot1_coord,
-            map_features_flat
-        ])
-        robot1_output = build_dueling_streams(robot1_features, 'robot1')
-        
-        # Robot 2的Dueling網絡
-        robot2_features = layers.Concatenate()([
-            layers.Flatten()(robot2_frontier),
-            robot2_coord,
-            map_features_flat
-        ])
-        robot2_output = build_dueling_streams(robot2_features, 'robot2')
-        
-        # 構建最終模型
+        # 創建模型
         model = models.Model(
-            inputs={
-                'map_input': map_input,
-                'frontier_input': frontier_input,
-                'robot1_pos_input': robot1_pos,
-                'robot2_pos_input': robot2_pos,
-                'robot1_target_input': robot1_target,
-                'robot2_target_input': robot2_target
-            },
-            outputs={
-                'robot1': robot1_output,
-                'robot2': robot2_output
-            }
-        )
-        
-        # 使用自定義的學習率調度器
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=0.0005,#原0.001
-            decay_steps=2000,#原1000
-            decay_rate=0.95#原0.9
+            inputs=[map_input, frontier_input, robots_poses, robots_targets],
+            outputs=outputs,
+            name='MultiRobotDuelingDQN'
         )
         
         # 編譯模型
         model.compile(
-            optimizer=tf.keras.optimizers.Adam(
-                learning_rate=lr_schedule,
-                clipnorm=0.5,#原1.0
-                beta_1=0.9,
-                beta_2=0.999,
-                epsilon=1e-7
-            ),
-            loss={
-                'robot1': self._huber_loss,
-                'robot2': self._huber_loss
-            }
+            optimizer='adam',
+            loss={f'robot{i}': self._huber_loss for i in range(self.max_robots)}
         )
         
         return model
-        
-    # def _huber_loss(self, y_true, y_pred, delta=1.0):
-    #     """自定義的 Huber 損失函數"""
-    #     error = y_true - y_pred
-    #     is_small_error = tf.abs(error) <= delta
-    #     squared_loss = 0.5 * tf.square(error)
-    #     linear_loss = delta * tf.abs(error) - 0.5 * tf.square(delta)
-    #     return tf.reduce_mean(
-    #         tf.where(is_small_error, squared_loss, linear_loss)
-    #     )
     
+    def pad_frontiers(self, frontiers):
+        """填充frontier點到固定長度並進行標準化"""
+        padded = np.zeros((self.max_frontiers, 2))
+        
+        if len(frontiers) > 0:
+            frontiers = np.array(frontiers)
+            n_frontiers = min(len(frontiers), self.max_frontiers)
+            padded[:n_frontiers] = frontiers[:n_frontiers]
+        
+        return padded
+    
+    def pad_robot_states(self, robots_poses, robots_targets, num_active_robots):
+        """填充機器人狀態到固定長度
+        
+        Args:
+            robots_poses: 實際機器人位置列表
+            robots_targets: 實際機器人目標列表
+            num_active_robots: 實際活躍的機器人數量
+        """
+        padded_poses = np.zeros((self.max_robots, 2))
+        padded_targets = np.zeros((self.max_robots, 2))
+        
+        if num_active_robots > 0:
+            n_robots = min(num_active_robots, self.max_robots)
+            padded_poses[:n_robots] = np.array(robots_poses)[:n_robots]
+            padded_targets[:n_robots] = np.array(robots_targets)[:n_robots]
+        
+        return padded_poses, padded_targets
+
     def _huber_loss(self, y_true, y_pred):
+        """Huber損失函數"""
         return tf.keras.losses.Huber(delta=1.0)(y_true, y_pred)
 
     def update_target_model(self):
@@ -475,51 +446,45 @@ class MultiRobotNetworkModel:
             target_weights[i] = tau * weights[i] + (1 - tau) * target_weights[i]
         self.target_model.set_weights(target_weights)
     
-    def predict(self, state, frontiers, robot1_pos, robot2_pos, robot1_target, robot2_target):
+    def predict(self, state, frontiers, robots_poses, robots_targets, num_active_robots):
         """預測動作值"""
         # 確保輸入形狀正確
         if len(state.shape) == 3:
             state = np.expand_dims(state, 0)
         if len(frontiers.shape) == 2:
             frontiers = np.expand_dims(frontiers, 0)
-        if len(robot1_pos.shape) == 1:
-            robot1_pos = np.expand_dims(robot1_pos, 0)
-        if len(robot2_pos.shape) == 1:
-            robot2_pos = np.expand_dims(robot2_pos, 0)
-        if len(robot1_target.shape) == 1:
-            robot1_target = np.expand_dims(robot1_target, 0)
-        if len(robot2_target.shape) == 1:
-            robot2_target = np.expand_dims(robot2_target, 0)
+            
+        # 填充機器人狀態
+        padded_poses, padded_targets = self.pad_robot_states(
+            robots_poses, robots_targets, num_active_robots)
+        
+        if len(padded_poses.shape) == 2:
+            padded_poses = np.expand_dims(padded_poses, 0)
+        if len(padded_targets.shape) == 2:
+            padded_targets = np.expand_dims(padded_targets, 0)
             
         return self.model.predict(
             {
                 'map_input': state,
                 'frontier_input': frontiers,
-                'robot1_pos_input': robot1_pos,
-                'robot2_pos_input': robot2_pos,
-                'robot1_target_input': robot1_target,
-                'robot2_target_input': robot2_target
+                'robots_poses_input': padded_poses,
+                'robots_targets_input': padded_targets
             },
             verbose=0
         )
     
-    def train_on_batch(self, states, frontiers, robot1_pos, robot2_pos, 
-                      robot1_target, robot2_target,
-                      robot1_targets, robot2_targets):
+    def train_on_batch(self, states, frontiers, robots_poses, robots_targets, 
+                      robot_targets_dict, num_active_robots_list):
         """訓練一個批次"""
+        # 確保robots_poses和robots_targets已經正確填充到max_robots維度
         history = self.model.train_on_batch(
             {
                 'map_input': states,
                 'frontier_input': frontiers,
-                'robot1_pos_input': robot1_pos,
-                'robot2_pos_input': robot2_pos,
-                'robot1_target_input': robot1_target,
-                'robot2_target_input': robot2_target
+                'robots_poses_input': robots_poses,
+                'robots_targets_input': robots_targets
             },
-            {
-                'robot1': robot1_targets,
-                'robot2': robot2_targets
-            }
+            robot_targets_dict
         )
         return history
     
@@ -531,6 +496,7 @@ class MultiRobotNetworkModel:
         config = {
             'input_shape': self.input_shape,
             'max_frontiers': self.max_frontiers,
+            'max_robots': self.max_robots,
             'd_model': self.d_model,
             'num_heads': self.num_heads,
             'dff': self.dff,
