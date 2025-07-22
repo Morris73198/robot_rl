@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from multi_robot_test.models.multi_robot_network import MultiRobotNetworkModel
 from multi_robot_test.models.multi_robot_trainer import MultiRobotTrainer
 from multi_robot_test.environment.multi_robot_no_unknown import Robot
-from two_robot_dueling_dqn_attention.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
+from multi_robot_test.config import MODEL_CONFIG, TRAIN_CONFIG, MODEL_DIR
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -94,7 +94,7 @@ def create_multi_robot_environment(num_robots=3, index_map=0, train=True, plot=T
 def main():
     """主訓練函數"""
     # 配置參數
-    NUM_ROBOTS = 3  # 可以修改這個數字來改變機器人數量
+    NUM_ROBOTS = 5  # 可以修改這個數字來改變機器人數量
     MAX_ROBOTS = 10  # 模型支援的最大機器人數量
     
     # 確保機器人數量合理
