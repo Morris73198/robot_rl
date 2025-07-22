@@ -5,7 +5,7 @@ from collections import deque
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import json
-from two_robot_dueling_dqn_attention.config import MODEL_DIR, ROBOT_CONFIG, REWARD_CONFIG
+from multi_robot_test.config import MODEL_DIR, ROBOT_CONFIG, REWARD_CONFIG
 
 class MultiRobotTrainer:
     def __init__(self, model, robots, memory_size=10000, batch_size=16, gamma=0.99):
