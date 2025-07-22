@@ -342,7 +342,7 @@ class MultiRobotTrainer:
         return loss
     
     def train(self, episodes=1000, target_update_freq=10, save_freq=100):
-        """執行多機器人協同訓練"""
+        """執行多機器人協同訓練 - 傳統方式：每個episode結束後訓練"""
         try:
             for episode in range(episodes):
                 # 重置環境 - 確保每個episode都是新的地圖
@@ -372,12 +372,12 @@ class MultiRobotTrainer:
                 total_reward = 0
                 robot_total_rewards = [0] * self.num_robots
                 steps = 0
-                episode_losses = []
                 episode_step_rewards = []  # 記錄每步的總獎勵
                 
                 # 定義最小目標距離
                 MIN_TARGET_DISTANCE = self.robots[0].sensor_range * 1.5
                 
+                # ===== Episode步驟循環 =====
                 while not any(robot.check_done() for robot in self.robots) and steps < 1500:
                     frontiers = self.robots[0].get_frontiers()
                     if len(frontiers) == 0:
@@ -452,7 +452,7 @@ class MultiRobotTrainer:
                         else:
                             next_robots_targets.append(robot.current_target_frontier.copy())
                     
-                    # 存儲經驗
+                    # 存儲經驗（但不訓練）
                     any_done = any(dones)
                     self.remember(
                         state, frontiers, robots_poses, robots_targets,
@@ -461,14 +461,10 @@ class MultiRobotTrainer:
                         any_done
                     )
                     
-                    # 每10步進行一次訓練（而不是等到episode結束）
-                    if len(self.memory) >= self.batch_size and steps % 10 == 0:
-                        loss = self.train_step()
-                        if loss is not None:
-                            if isinstance(loss, list):
-                                episode_losses.append(np.mean(loss))
-                            else:
-                                episode_losses.append(loss)
+                    # *** 移除每步的訓練邏輯 ***
+                    # 原本的代碼：
+                    # if len(self.memory) >= self.batch_size and steps % 10 == 0:
+                    #     loss = self.train_step()
                     
                     # 更新狀態
                     state = next_states[0]
@@ -482,14 +478,22 @@ class MultiRobotTrainer:
                         print(f"  Episode {episode+1}: 探索完成，步數: {steps}")
                         break
                 
-                # 最終訓練步驟（如果還有經驗）
+                # ===== Episode結束後的訓練邏輯 =====
+                episode_losses = []
+                
+                # 只要有足夠的經驗就進行一次訓練（傳統方式）
                 if len(self.memory) >= self.batch_size:
-                    final_loss = self.train_step()
-                    if final_loss is not None:
-                        if isinstance(final_loss, list):
-                            episode_losses.append(np.mean(final_loss))
+                    print(f"  Episode {episode+1}: 開始訓練，記憶體大小: {len(self.memory)}")
+                    
+                    # 每個episode結束後只訓練一次
+                    loss = self.train_step()
+                    if loss is not None:
+                        if isinstance(loss, list):
+                            episode_losses.append(np.mean(loss))
                         else:
-                            episode_losses.append(final_loss)
+                            episode_losses.append(loss)
+                    
+                    print(f"  Episode {episode+1}: 完成訓練")
                 
                 # 記錄訓練歷史
                 self.training_history['episode_rewards'].append(total_reward)
@@ -523,19 +527,21 @@ class MultiRobotTrainer:
                 # 更新目標網絡
                 if episode % target_update_freq == 0:
                     self.model.update_target_model()
+                    print(f"  Episode {episode+1}: 更新目標網絡")
                 
                 # 打印訓練進度（增強版）
                 if episode % 10 == 0 or episode < 5:
                     avg_reward = np.mean(self.training_history['episode_rewards'][-10:]) if self.training_history['episode_rewards'] else 0
+                    avg_loss = np.mean(episode_losses) if episode_losses else 0
                     print(f"Episode {episode+1:4d} | Avg Reward: {avg_reward:7.2f} | "
-                          f"Steps: {steps:3d} | Epsilon: {self.epsilon:.3f}")
+                          f"Steps: {steps:3d} | Epsilon: {self.epsilon:.3f} | Loss: {avg_loss:.4f}")
                     
                     for i in range(self.num_robots):
                         robot_avg_reward = np.mean(self.training_history['robot_rewards'][f'robot{i}'][-10:]) if self.training_history['robot_rewards'][f'robot{i}'] else 0
                         print(f"  Robot{i} Avg Reward: {robot_avg_reward:7.2f}")
                     
                     print(f"  實際探索進度: {exploration_progress:.1%}")
-                    print(f"  總獎勵: {total_reward:.2f}, 步數: {steps}")
+                    print(f"  總獎勵: {total_reward:.2f}, 記憶體大小: {len(self.memory)}")
                     
                     # 檢查是否提前結束
                     any_done = any(robot.check_done() for robot in self.robots)
@@ -547,10 +553,6 @@ class MultiRobotTrainer:
                             print(f"  結束原因: 探索完成")
                         else:
                             print(f"  結束原因: 其他")
-                    
-                    if episode_losses:
-                        avg_loss = np.mean(episode_losses)
-                        print(f"  平均損失: {avg_loss:.4f}")
                 
                 # 保存檢查點
                 if episode % save_freq == 0 and episode > 0:
