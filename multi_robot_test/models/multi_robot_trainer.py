@@ -59,21 +59,7 @@ class MultiRobotTrainer:
     def remember(self, state, frontiers, robots_poses, robots_targets,
                 robot_actions, robot_rewards,
                 next_state, next_frontiers, next_robots_poses, next_robots_targets, done):
-        """存儲經驗到回放緩衝區
-        
-        Args:
-            state: 當前環境狀態
-            frontiers: frontier點座標
-            robots_poses: 所有機器人當前位置列表
-            robots_targets: 所有機器人當前目標列表
-            robot_actions: 所有機器人選擇的動作列表
-            robot_rewards: 所有機器人獲得的獎勵列表
-            next_state: 下一步環境狀態
-            next_frontiers: 下一步frontier點
-            next_robots_poses: 下一步機器人位置列表
-            next_robots_targets: 下一步機器人目標列表
-            done: 是否結束
-        """
+        """存儲經驗到回放緩衝區"""
         self.memory.append((
             state, frontiers, robots_poses, robots_targets,
             robot_actions, robot_rewards,
@@ -131,27 +117,71 @@ class MultiRobotTrainer:
         return normalized
     
     def _calculate_exploration_progress(self):
-        """計算探索進度的備用方法"""
+        """計算探索進度的正確方法"""
         try:
-            # 使用第一個機器人的探索信息
             robot = self.robots[0]
             
-            # 計算已探索的區域比例
             if hasattr(robot, 'op_map') and hasattr(robot, 'global_map'):
-                # op_map 中已知的區域（非127的區域）
-                total_pixels = robot.global_map.size
-                unknown_pixels = np.sum(robot.op_map == 127)
-                known_pixels = total_pixels - unknown_pixels
+                # 正確的計算方法：已探索的自由空間 / 總自由空間
+                explored_free_space = np.sum(robot.op_map == 255)  # 已探索的自由區域
+                total_free_space = np.sum(robot.global_map == 255)  # 總自由區域
                 
-                # 計算探索進度
-                exploration_progress = known_pixels / total_pixels if total_pixels > 0 else 0.0
-                return min(exploration_progress, 1.0)  # 確保不超過1.0
+                if total_free_space > 0:
+                    exploration_progress = explored_free_space / total_free_space
+                    return min(exploration_progress, 1.0)
+                else:
+                    return 0.0
             else:
                 return 0.0
                 
         except Exception as e:
             print(f"計算探索進度時出錯: {str(e)}")
             return 0.0
+    
+    def _analyze_exploration_status(self):
+        """分析探索狀態，診斷為什麼提前結束"""
+        try:
+            robot = self.robots[0]
+            
+            # 基本統計
+            total_pixels = robot.global_map.size
+            free_pixels = np.sum(robot.global_map == 255)  # 總自由空間
+            obstacle_pixels = np.sum(robot.global_map == 0)  # 障礙物
+            
+            explored_free = np.sum(robot.op_map == 255)  # 已探索自由空間
+            unknown_pixels = np.sum(robot.op_map == 127)  # 未知區域
+            explored_obstacles = np.sum(robot.op_map == 0)  # 已知障礙物
+            
+            frontiers = robot.get_frontiers()
+            
+            print(f"\n探索狀態分析:")
+            print(f"  地圖總像素: {total_pixels}")
+            print(f"  總自由空間: {free_pixels} ({free_pixels/total_pixels:.1%})")
+            print(f"  總障礙物: {obstacle_pixels} ({obstacle_pixels/total_pixels:.1%})")
+            print(f"  已探索自由空間: {explored_free} ({explored_free/free_pixels:.1%})")
+            print(f"  未知區域: {unknown_pixels} ({unknown_pixels/total_pixels:.1%})")
+            print(f"  可用frontier數: {len(frontiers)}")
+            
+            # 診斷問題
+            exploration_ratio = explored_free / free_pixels if free_pixels > 0 else 0
+            
+            if len(frontiers) == 0 and exploration_ratio < 0.9:
+                print(f"  問題: 無frontier但探索度只有{exploration_ratio:.1%}")
+                print(f"       可能原因: 剩餘區域被障礙物隔離")
+            elif exploration_ratio >= robot.finish_percent:
+                print(f"  正常: 探索度{exploration_ratio:.1%}已達到閾值{robot.finish_percent:.1%}")
+            
+            return {
+                'total_free_space': free_pixels,
+                'explored_free_space': explored_free,
+                'exploration_ratio': exploration_ratio,
+                'unknown_pixels': unknown_pixels,
+                'frontier_count': len(frontiers)
+            }
+            
+        except Exception as e:
+            print(f"分析探索狀態時出錯: {str(e)}")
+            return None
     
     def select_actions(self, state, frontiers, num_valid_frontiers):
         """為所有機器人選擇動作"""
@@ -315,20 +345,35 @@ class MultiRobotTrainer:
         """執行多機器人協同訓練"""
         try:
             for episode in range(episodes):
-                # 初始化環境和狀態
-                state = self.robots[0].begin()  # 主機器人初始化環境
-                for robot in self.robots[1:]:   # 其他機器人同步開始
+                # 重置環境 - 確保每個episode都是新的地圖
+                print(f"\n=== Episode {episode+1:4d} ===")
+                
+                # 完全重置所有機器人環境
+                state = self.robots[0].reset()  # 主機器人重置環境（新地圖）
+                for robot in self.robots[1:]:   # 其他機器人同步重置
+                    robot.reset()
+                
+                # 重新開始環境
+                state = self.robots[0].begin()  # 開始新episode
+                for robot in self.robots[1:]:   
                     robot.begin()
                 
-                # 啟動地圖追蹤器
-                if self.map_tracker:
-                    self.map_tracker.start_tracking()
+                # 啟動地圖追蹤器（只啟動一次）
+                if self.map_tracker and episode == 0:
+                    print("初始化地圖追蹤器...")
+                elif self.map_tracker:
+                    # 重置追蹤器狀態
+                    if hasattr(self.map_tracker, 'reset'):
+                        self.map_tracker.reset()
+                    else:
+                        self.map_tracker.start_tracking()
                 
                 # 初始化episode統計
                 total_reward = 0
                 robot_total_rewards = [0] * self.num_robots
                 steps = 0
                 episode_losses = []
+                episode_step_rewards = []  # 記錄每步的總獎勵
                 
                 # 定義最小目標距離
                 MIN_TARGET_DISTANCE = self.robots[0].sensor_range * 1.5
@@ -336,6 +381,7 @@ class MultiRobotTrainer:
                 while not any(robot.check_done() for robot in self.robots) and steps < 1500:
                     frontiers = self.robots[0].get_frontiers()
                     if len(frontiers) == 0:
+                        print(f"  Episode {episode+1}: 沒有frontier，結束探索")
                         break
                     
                     # 獲取當前狀態
@@ -390,7 +436,11 @@ class MultiRobotTrainer:
                     
                     # 更新地圖追蹤器
                     if self.map_tracker:
-                        self.map_tracker.update()
+                        try:
+                            self.map_tracker.update()
+                        except Exception as e:
+                            # 如果地圖追蹤器出錯，不影響訓練
+                            pass
                     
                     # 收集下一步狀態資料
                     next_robots_poses = [robot.robot_position.copy() for robot in self.robots]
@@ -411,8 +461,8 @@ class MultiRobotTrainer:
                         any_done
                     )
                     
-                    # 訓練模型
-                    if any_done:
+                    # 每10步進行一次訓練（而不是等到episode結束）
+                    if len(self.memory) >= self.batch_size and steps % 10 == 0:
                         loss = self.train_step()
                         if loss is not None:
                             if isinstance(loss, list):
@@ -422,12 +472,24 @@ class MultiRobotTrainer:
                     
                     # 更新狀態
                     state = next_states[0]
-                    total_reward = sum(rewards)
+                    step_total_reward = sum(rewards)
+                    total_reward += step_total_reward
+                    episode_step_rewards.append(step_total_reward)
                     steps += 1
                     
                     # 檢查是否探索完成
                     if any(robot.check_done() for robot in self.robots):
+                        print(f"  Episode {episode+1}: 探索完成，步數: {steps}")
                         break
+                
+                # 最終訓練步驟（如果還有經驗）
+                if len(self.memory) >= self.batch_size:
+                    final_loss = self.train_step()
+                    if final_loss is not None:
+                        if isinstance(final_loss, list):
+                            episode_losses.append(np.mean(final_loss))
+                        else:
+                            episode_losses.append(final_loss)
                 
                 # 記錄訓練歷史
                 self.training_history['episode_rewards'].append(total_reward)
@@ -440,22 +502,19 @@ class MultiRobotTrainer:
                 if episode_losses:
                     self.training_history['losses'].append(np.mean(episode_losses))
                 
-                # 計算探索進度
-                if self.map_tracker:
-                    try:
-                        # 嘗試使用地圖追蹤器的方法
-                        if hasattr(self.map_tracker, 'get_exploration_progress'):
-                            exploration_progress = self.map_tracker.get_exploration_progress()
-                            self.training_history['exploration_progress'].append(exploration_progress)
-                        else:
-                            # 如果方法不存在，使用機器人的探索進度
-                            exploration_progress = self._calculate_exploration_progress()
-                            self.training_history['exploration_progress'].append(exploration_progress)
-                    except Exception as e:
-                        # 如果計算失敗，記錄警告但繼續訓練
-                        print(f"警告: 無法計算探索進度: {str(e)}")
-                        exploration_progress = 0.0
-                        self.training_history['exploration_progress'].append(exploration_progress)
+                # 計算探索進度（在episode結束時）
+                exploration_progress = 0.0
+                
+                # 使用機器人自己的探索進度計算方法
+                if hasattr(self.robots[0], 'get_exploration_progress'):
+                    exploration_progress = self.robots[0].get_exploration_progress()
+                else:
+                    exploration_progress = self._calculate_exploration_progress()
+                
+                # 詳細分析探索狀態
+                exploration_analysis = self._analyze_exploration_status()
+                
+                self.training_history['exploration_progress'].append(exploration_progress)
                 
                 # 更新epsilon（探索率衰減）
                 if self.epsilon > self.epsilon_min:
@@ -465,29 +524,49 @@ class MultiRobotTrainer:
                 if episode % target_update_freq == 0:
                     self.model.update_target_model()
                 
-                # 打印訓練進度
-                if episode % 10 == 0:
+                # 打印訓練進度（增強版）
+                if episode % 10 == 0 or episode < 5:
                     avg_reward = np.mean(self.training_history['episode_rewards'][-10:]) if self.training_history['episode_rewards'] else 0
-                    print(f"Episode {episode:4d} | Avg Reward: {avg_reward:7.2f} | "
+                    print(f"Episode {episode+1:4d} | Avg Reward: {avg_reward:7.2f} | "
                           f"Steps: {steps:3d} | Epsilon: {self.epsilon:.3f}")
                     
                     for i in range(self.num_robots):
                         robot_avg_reward = np.mean(self.training_history['robot_rewards'][f'robot{i}'][-10:]) if self.training_history['robot_rewards'][f'robot{i}'] else 0
                         print(f"  Robot{i} Avg Reward: {robot_avg_reward:7.2f}")
                     
-                    # 打印探索進度
-                    if self.training_history['exploration_progress']:
-                        current_exploration = self.training_history['exploration_progress'][-1]
-                        print(f"  探索進度: {current_exploration:.1%}")
+                    print(f"  實際探索進度: {exploration_progress:.1%}")
+                    print(f"  總獎勵: {total_reward:.2f}, 步數: {steps}")
+                    
+                    # 檢查是否提前結束
+                    any_done = any(robot.check_done() for robot in self.robots)
+                    if any_done:
+                        frontiers = self.robots[0].get_frontiers()
+                        if len(frontiers) == 0:
+                            print(f"  結束原因: 無可到達的frontier點")
+                        elif exploration_progress >= getattr(self.robots[0], 'finish_percent', 0.98):
+                            print(f"  結束原因: 探索完成")
+                        else:
+                            print(f"  結束原因: 其他")
+                    
+                    if episode_losses:
+                        avg_loss = np.mean(episode_losses)
+                        print(f"  平均損失: {avg_loss:.4f}")
                 
                 # 保存檢查點
                 if episode % save_freq == 0 and episode > 0:
                     self.save_checkpoint(episode)
                 
-                # 重置環境
-                state = self.robots[0].reset()
-                for robot in self.robots[1:]:
-                    robot.reset()
+                # 確保清理資源（每個episode結束後）
+                for robot in self.robots:
+                    if hasattr(robot, 'current_target_frontier'):
+                        robot.current_target_frontier = None
+                
+                # 停止地圖追蹤（如果需要）
+                if self.map_tracker and hasattr(self.map_tracker, 'stop_tracking'):
+                    try:
+                        self.map_tracker.stop_tracking()
+                    except:
+                        pass
             
             # 訓練結束後保存最終模型
             self.save_checkpoint(episodes)
