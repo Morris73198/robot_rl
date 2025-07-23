@@ -94,7 +94,7 @@ def create_multi_robot_environment(num_robots=3, index_map=0, train=True, plot=T
 def main():
     """主訓練函數"""
     # 配置參數
-    NUM_ROBOTS = 5  # 可以修改這個數字來改變機器人數量
+    NUM_ROBOTS = 10  # 可以修改這個數字來改變機器人數量
     MAX_ROBOTS = 10  # 模型支援的最大機器人數量
     
     # 確保機器人數量合理
