@@ -527,32 +527,36 @@ class MultiRobotTrainer:
                 # 更新目標網絡
                 if episode % target_update_freq == 0:
                     self.model.update_target_model()
-                    print(f"  Episode {episode+1}: 更新目標網絡")
+                    print(f"更新目標網絡")
                 
-                # 打印訓練進度（增強版）
+                # 打印訓練進度（增強版）- 修改此部分添加單回合獎勵
                 if episode % 10 == 0 or episode < 5:
                     avg_reward = np.mean(self.training_history['episode_rewards'][-10:]) if self.training_history['episode_rewards'] else 0
                     avg_loss = np.mean(episode_losses) if episode_losses else 0
-                    print(f"Episode {episode+1:4d} | Avg Reward: {avg_reward:7.2f} | "
-                          f"Steps: {steps:3d} | Epsilon: {self.epsilon:.3f} | Loss: {avg_loss:.4f}")
                     
+                    # *** 主要修改：添加當前回合獎勵 ***
+                    print(f"Episode {episode+1:4d} | Avg Reward: {avg_reward:8.2f} | Current Reward: {total_reward:8.2f} | "
+                        f"Steps: {steps:3d} | Epsilon: {self.epsilon:.3f} | Loss: {avg_loss:.4f}")
+                    
+                    # *** 主要修改：為每個機器人添加當前回合獎勵 ***
                     for i in range(self.num_robots):
                         robot_avg_reward = np.mean(self.training_history['robot_rewards'][f'robot{i}'][-10:]) if self.training_history['robot_rewards'][f'robot{i}'] else 0
-                        print(f"  Robot{i} Avg Reward: {robot_avg_reward:7.2f}")
+                        robot_current_reward = robot_total_rewards[i]  # 當前回合該機器人的獎勵
+                        print(f"Robot{i} Avg Reward: {robot_avg_reward:8.2f} | Current Reward: {robot_current_reward:8.2f}")
                     
-                    print(f"  實際探索進度: {exploration_progress:.1%}")
-                    print(f"  總獎勵: {total_reward:.2f}, 記憶體大小: {len(self.memory)}")
+                    print(f"實際探索進度: {exploration_progress:.1%}")
+                    print(f"總獎勵: {total_reward:.2f}, 記憶體大小: {len(self.memory)}")
                     
                     # 檢查是否提前結束
                     any_done = any(robot.check_done() for robot in self.robots)
                     if any_done:
                         frontiers = self.robots[0].get_frontiers()
                         if len(frontiers) == 0:
-                            print(f"  結束原因: 無可到達的frontier點")
+                            print(f"結束原因: 無可到達的frontier點")
                         elif exploration_progress >= getattr(self.robots[0], 'finish_percent', 0.98):
-                            print(f"  結束原因: 探索完成")
+                            print(f"結束原因: 探索完成")
                         else:
-                            print(f"  結束原因: 其他")
+                            print(f"結束原因: 其他")
                 
                 # 保存檢查點
                 if episode % save_freq == 0 and episode > 0:
@@ -602,7 +606,7 @@ class MultiRobotTrainer:
                     self.map_tracker.stop_tracking()
     
     def save_checkpoint(self, episode):
-        """保存檢查點"""
+        """保存檢查點並生成訓練進度圖"""
         try:
             # 確保保存目錄存在
             if not os.path.exists(MODEL_DIR):
@@ -624,10 +628,144 @@ class MultiRobotTrainer:
                         history_to_save[key] = [float(x) for x in value]
                 json.dump(history_to_save, f, indent=2)
             
+            # 生成訓練進度圖
+            self.plot_training_progress_in_checkpoint(episode)
+            
             print(f"檢查點已保存: Episode {episode}")
             
         except Exception as e:
             print(f"保存檢查點時出錯: {str(e)}")
+
+    def plot_training_progress_in_checkpoint(self, episode):
+        """在檢查點保存時生成訓練進度圖（不包含機器人個別獎勵）"""
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')  # 使用非交互式後端
+        
+        try:
+            # 檢查是否有數據
+            if not self.training_history.get('episode_rewards'):
+                print(f"Episode {episode}: 沒有訓練歷史數據，跳過圖表生成")
+                return
+            
+            episodes_count = len(self.training_history['episode_rewards'])
+            print(f"Episode {episode}: 生成訓練進度圖 (包含 {episodes_count} 個episode的數據)")
+            
+            # 創建子圖 - 2x2布局，不包含機器人個別獎勵
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            fig.suptitle(f'Training Progress - Episode {episode} ({episodes_count} episodes)', fontsize=16)
+            
+            episodes = range(1, episodes_count + 1)
+            
+            # 1. 總獎勵趨勢
+            axes[0, 0].plot(episodes, self.training_history['episode_rewards'], 'b-', linewidth=2)
+            axes[0, 0].set_title('Total Episode Rewards', fontsize=14)
+            axes[0, 0].set_xlabel('Episode')
+            axes[0, 0].set_ylabel('Reward')
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            # 添加最新數值標註
+            if episodes_count > 0:
+                latest_reward = self.training_history['episode_rewards'][-1]
+                axes[0, 0].annotate(f'Latest: {latest_reward:.1f}', 
+                                xy=(episodes_count, latest_reward),
+                                xytext=(10, 10), textcoords='offset points',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                                fontsize=10)
+            
+            # 2. Episode 長度（步數）
+            if 'episode_lengths' in self.training_history and self.training_history['episode_lengths']:
+                axes[0, 1].plot(episodes, self.training_history['episode_lengths'], 'g-', linewidth=2)
+                axes[0, 1].set_title('Episode Lengths (Steps)', fontsize=14)
+                axes[0, 1].set_xlabel('Episode')
+                axes[0, 1].set_ylabel('Steps')
+                axes[0, 1].grid(True, alpha=0.3)
+                
+                # 添加平均線
+                avg_steps = sum(self.training_history['episode_lengths']) / len(self.training_history['episode_lengths'])
+                axes[0, 1].axhline(y=avg_steps, color='r', linestyle='--', alpha=0.7, label=f'Avg: {avg_steps:.1f}')
+                axes[0, 1].legend()
+            else:
+                axes[0, 1].text(0.5, 0.5, 'No episode length data', 
+                            ha='center', va='center', transform=axes[0, 1].transAxes, fontsize=12)
+                axes[0, 1].set_title('Episode Lengths (No Data)', fontsize=14)
+            
+            # 3. 探索率 (Epsilon)
+            if 'exploration_rates' in self.training_history and self.training_history['exploration_rates']:
+                axes[1, 0].plot(episodes, self.training_history['exploration_rates'], 'orange', linewidth=2)
+                axes[1, 0].set_title('Exploration Rate (Epsilon)', fontsize=14)
+                axes[1, 0].set_xlabel('Episode')
+                axes[1, 0].set_ylabel('Epsilon')
+                axes[1, 0].grid(True, alpha=0.3)
+                
+                # 添加當前值標註
+                current_epsilon = self.training_history['exploration_rates'][-1]
+                axes[1, 0].annotate(f'Current: {current_epsilon:.4f}', 
+                                xy=(episodes_count, current_epsilon),
+                                xytext=(10, 10), textcoords='offset points',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='orange', alpha=0.7),
+                                fontsize=10)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'No exploration rate data', 
+                            ha='center', va='center', transform=axes[1, 0].transAxes, fontsize=12)
+                axes[1, 0].set_title('Exploration Rate (No Data)', fontsize=14)
+            
+            # 4. 訓練損失
+            if 'losses' in self.training_history and self.training_history['losses']:
+                # 過濾有效的損失值
+                valid_losses = []
+                valid_indices = []
+                for i, loss in enumerate(self.training_history['losses']):
+                    if loss is not None and not (isinstance(loss, float) and (loss != loss)):  # 檢查 NaN
+                        valid_losses.append(loss)
+                        valid_indices.append(i + 1)
+                
+                if valid_losses:
+                    axes[1, 1].plot(valid_indices, valid_losses, 'r-', linewidth=2)
+                    axes[1, 1].set_title('Training Loss', fontsize=14)
+                    axes[1, 1].set_xlabel('Training Step')
+                    axes[1, 1].set_ylabel('Loss')
+                    axes[1, 1].grid(True, alpha=0.3)
+                    
+                    # 添加移動平均線（如果數據點足夠）
+                    if len(valid_losses) > 10:
+                        window_size = min(20, len(valid_losses) // 5)
+                        moving_avg = []
+                        for i in range(len(valid_losses)):
+                            start_idx = max(0, i - window_size + 1)
+                            moving_avg.append(sum(valid_losses[start_idx:i+1]) / (i - start_idx + 1))
+                        
+                        axes[1, 1].plot(valid_indices, moving_avg, '--', color='darkred', 
+                                    alpha=0.8, linewidth=1.5, label=f'Moving Avg ({window_size})')
+                        axes[1, 1].legend()
+                else:
+                    axes[1, 1].text(0.5, 0.5, 'No valid loss data', 
+                                ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=12)
+                    axes[1, 1].set_title('Training Loss (No Valid Data)', fontsize=14)
+            else:
+                axes[1, 1].text(0.5, 0.5, 'No loss data', 
+                            ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=12)
+                axes[1, 1].set_title('Training Loss (No Data)', fontsize=14)
+            
+            plt.tight_layout()
+            
+            # 保存圖片
+            plot_path = os.path.join(MODEL_DIR, f'training_progress_episode_{episode}.png')
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+            plt.close('all')  # 關閉圖形釋放內存
+            
+            # 驗證保存結果
+            if os.path.exists(plot_path):
+                file_size = os.path.getsize(plot_path)
+                print(f"訓練進度圖已保存: {plot_path} ({file_size:,} bytes)")
+            else:
+                print(f"圖片保存失敗: {plot_path}")
+                
+        except Exception as e:
+            print(f"Episode {episode}: 生成訓練進度圖時出錯: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
     
     def load_checkpoint(self, filepath):
         """載入檢查點"""
