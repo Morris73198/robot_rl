@@ -530,7 +530,7 @@ class MultiRobotTrainer:
                     print(f"更新目標網絡")
                 
                 # 打印訓練進度（增強版）- 修改此部分添加單回合獎勵
-                if episode % 10 == 0 or episode < 5:
+                if True:
                     avg_reward = np.mean(self.training_history['episode_rewards'][-10:]) if self.training_history['episode_rewards'] else 0
                     avg_loss = np.mean(episode_losses) if episode_losses else 0
                     

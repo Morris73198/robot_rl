@@ -5,6 +5,8 @@ from scipy import spatial
 from skimage import io
 from skimage.transform import resize
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('TkAgg') 
 from ..utils.inverse_sensor_model import inverse_sensor_model
 from scipy.ndimage import distance_transform_edt
 import random
