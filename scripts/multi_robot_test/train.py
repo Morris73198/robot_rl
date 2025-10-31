@@ -94,8 +94,8 @@ def create_multi_robot_environment(num_robots=3, index_map=0, train=True, plot=T
 def main():
     """主訓練函數"""
     # 配置參數
-    NUM_ROBOTS = 10  # 可以修改這個數字來改變機器人數量
-    MAX_ROBOTS = 10  # 模型支援的最大機器人數量
+    NUM_ROBOTS = 3  # 可以修改這個數字來改變機器人數量
+    MAX_ROBOTS = 4  # 模型支援的最大機器人數量
     
     # 確保機器人數量合理
     if NUM_ROBOTS > MAX_ROBOTS:
@@ -135,7 +135,7 @@ def main():
             num_robots=NUM_ROBOTS,
             index_map=0, 
             train=True, 
-            plot=True
+            plot=False
         )
         
         if robots is None:
@@ -163,7 +163,7 @@ def main():
             # 全新訓練時使用較大的探索率
             trainer.epsilon = 1.0
             trainer.epsilon_min = 0.075
-            trainer.epsilon_decay = 0.9985
+            trainer.epsilon_decay = 0.9995
             print(f"全新訓練模式 - 當前 epsilon: {trainer.epsilon}")
         
         # 確保模型保存目錄存在
