@@ -593,7 +593,7 @@ def test_hybrid_approach(map_file_path, start_points_list, model_path, output_di
                 # 添加標籤和標題
                 plt.xlabel('Time (steps)', fontsize=14)
                 plt.ylabel('Coverage', fontsize=14)
-                plt.title(f'Time-Coverage Analysis - Hybrid Approach (Start Point {start_idx+1})', fontsize=16)
+                plt.title(f'Time-Coverage Analysis(Start Point {start_idx+1})', fontsize=16)
                 
                 # 添加網格和圖例
                 plt.grid(True, linestyle='--', alpha=0.7)
@@ -675,7 +675,7 @@ def test_hybrid_approach(map_file_path, start_points_list, model_path, output_di
             
             plt.xlabel('Time (steps)', fontsize=14)
             plt.ylabel('Coverage', fontsize=14)
-            plt.title(f'Time-Coverage Analysis - Hybrid Approach (Start Point {start_point})', fontsize=16)
+            plt.title(f'Time-Coverage Analysis (Start Point {start_point})', fontsize=16)
             plt.grid(True, linestyle='--', alpha=0.7)
             plt.legend(fontsize=12)
             plt.ylim(0, 1.05)
@@ -692,7 +692,7 @@ def test_hybrid_approach(map_file_path, start_points_list, model_path, output_di
         
         plt.xlabel('Time (steps)', fontsize=14)
         plt.ylabel('Total Coverage (Union)', fontsize=14)
-        plt.title('Total Coverage Comparison - Hybrid Approach', fontsize=16)
+        plt.title('Total Coverage Comparison Across Different Start Points', fontsize=16)
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.legend(fontsize=12)
         plt.ylim(0, 1.05)
@@ -712,11 +712,11 @@ def test_hybrid_approach(map_file_path, start_points_list, model_path, output_di
 
 def main():
     parser = argparse.ArgumentParser(description='測試多機器人混合探索策略')
-    parser.add_argument('--map', type=str, default=os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6112b.png'),
+    parser.add_argument('--map', type=str, default=os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'ttttttt.png'),
                         help='地圖檔案路徑')
-    parser.add_argument('--model', type=str, default=os.path.join(MODEL_DIR, 'best0111.h5'),
+    parser.add_argument('--model', type=str, default=os.path.join(MODEL_DIR, 'dueling_attention.h5'),
                         help='訓練好的模型路徑')
-    parser.add_argument('--output', type=str, default='hybrid_results',
+    parser.add_argument('--output', type=str, default='hy_7',
                         help='輸出目錄')
     
     args = parser.parse_args()
@@ -731,13 +731,13 @@ def main():
     start_points = [
         [[100, 100], [100, 100]],  # 起始點 1
         [[520, 120], [520, 120]],  # 起始點 2
-        [[630, 150], [630, 150]],   # 起始點 3
+        [[250, 250], [250, 250]],   # 起始點 3
         [[250, 130], [250, 130]],   # 起始點 4
         [[250, 100], [250, 100]],  # 起始點 5
         [[400, 120], [400, 120]],  # 起始點 6
         [[140, 410], [140, 410]],   # 起始點 7
         [[110, 590], [110, 590]],   # 起始點 8
-        [[900, 300], [90, 300]],   # 起始點 9
+        [[90, 300], [90, 300]],   # 起始點 9
         [[260, 200], [260, 200]],  # 起始點 10
     ]
     
