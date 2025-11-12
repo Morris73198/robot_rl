@@ -71,7 +71,7 @@ class MarketRobot:
         if peer not in self.peers and peer.id != self.id:
             self.peers.append(peer)
     
-    def generate_initial_tasks(self, num_tasks=5):  # 從10減少到5
+    def generate_initial_tasks(self, num_tasks=10):  # 從10減少到5
         """生成初始任務列表，只使用frontier點"""
         frontiers = self.robot.get_frontiers()
         
@@ -96,7 +96,7 @@ class MarketRobot:
         self.task_id_counter += 1
         return task_id
     
-    def generate_frontier_goals(self, num_goals=3):  # 從5減少到3
+    def generate_frontier_goals(self, num_goals=10):  # 從5減少到3
         """生成基於frontier的目標點"""
         frontiers = self.robot.get_frontiers()
         
@@ -388,14 +388,14 @@ class MarketRobot:
                 info_gain = self.estimate_info_gain(task_position)
                 self.total_info_gain += info_gain
                 
-                new_tasks = self.generate_frontier_goals(2)  # 從3減少到2
+                new_tasks = self.generate_frontier_goals(5)  # 從3減少到2
                 for task in new_tasks:
                     self.tasks.append(task)
                 
                 self.plan_optimal_tour()
                 
                 # 降低拍賣頻率
-                if random.random() < 0.3:  # 從0.5降到0.3
+                if random.random() < 0.5:  # 從0.5降到0.3
                     tasks_to_auction = list(self.tasks[:2])  # 只拍賣前2個任務
                     for task in tasks_to_auction:
                         self.auction_task(task)
@@ -731,7 +731,7 @@ def market_exploration(map_file_path, start_points_list, output_dir='results_mar
                 # 大幅降低拍賣頻率
                 if steps % 10 == 0:  # 從5改為10
                     for robot in [market_robot1, market_robot2]:
-                        if robot.tasks and random.random() < 0.3:  # 只有30%機率
+                        if robot.tasks and random.random() < 0.5:  # 只有30%機率
                             task = robot.tasks[0]  # 只拍賣第一個任務
                             try:
                                 robot.auction_task(task)
@@ -865,21 +865,26 @@ def market_exploration(map_file_path, start_points_list, output_dir='results_mar
     print(f"結果儲存在: {output_dir}")
 
 def main():
-    map_file_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'ttttttt.png')
+    map_file_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6032b.png')
     
     if not os.path.exists(map_file_path):
         print(f"警告: 在 {map_file_path} 找不到指定的地圖檔案")
         exit(1)
     
     start_points = [
-        [[100, 100], [100, 100]],
-        [[520, 120], [520, 120]],
-        [[630, 150], [630, 150]],
-        [[250, 130], [250, 130]],
-        [[250, 100], [250, 100]],
-    ]  # 減少測試點數量以加速測試
+        [[100, 100], [100, 100]],  # 起始點 1
+        [[520, 120], [520, 120]],  # 起始點 2
+        [[630, 150], [630, 150]],   # 起始點 3
+        [[250, 130], [250, 130]],   # 起始點 4
+        [[250, 100], [250, 100]],  # 起始點 5
+        [[400, 120], [400, 120]],  # 起始點 6
+        [[140, 410], [140, 410]],   # 起始點 7
+        [[110, 590], [110, 590]],   # 起始點 8
+        [[90, 300], [90, 300]],   # 起始點 9
+        [[260, 200], [260, 200]],  # 起始點 10
+    ]
     
-    output_dir = 'results_market_based_optimized'
+    output_dir = 'results_market_based_optimized2'
     print(f"執行優化版本的基於市場架構的多機器人探索...")
     market_exploration(map_file_path, start_points, output_dir)
 
