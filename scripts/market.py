@@ -865,7 +865,7 @@ def market_exploration(map_file_path, start_points_list, output_dir='results_mar
     print(f"結果儲存在: {output_dir}")
 
 def main():
-    map_file_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'img_6032b.png')
+    map_file_path = os.path.join(os.getcwd(), 'data', 'DungeonMaps', 'test', 'ttttttt.png')
     
     if not os.path.exists(map_file_path):
         print(f"警告: 在 {map_file_path} 找不到指定的地圖檔案")
@@ -884,7 +884,7 @@ def main():
         [[260, 200], [260, 200]],  # 起始點 10
     ]
     
-    output_dir = 'results_market_based_optimized2'
+    output_dir = 'results_market_based_optimized3'
     print(f"執行優化版本的基於市場架構的多機器人探索...")
     market_exploration(map_file_path, start_points, output_dir)
 
